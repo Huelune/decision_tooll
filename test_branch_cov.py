@@ -96,6 +96,7 @@ def test():
             assert any(k[1] == o and k[0].line == d.line for k in hits['cov']), (d.line, o)
 
     test_howto()
+    test_bva()
     test_gui()
     print('OK')
     print(screen)
@@ -124,13 +125,81 @@ def test_howto():
     assert r['cov'][(d[5], 'F')] == ['TC1*'], r['cov']
     assert [(x.line, o) for x, o in bc.need(d[7], 'T')] == [(5, 'F'), (6, 'F'), (7, 'T')]
     vals = bc.values(bc.need(d[7], 'T'), p[3])
-    assert vals == {'p': '입력 인자', 'stub_ok': 'stub 반환값', 'v': '함수 안에서 계산 (L4)',
+    assert vals == {'p': '입력 인자', 'stub_ok': 'stub 반환값', 'v': 'get_val stub 반환값 (L4)',
                     'q': 'stub이 &로 채움 (L4)', 'st->mode': '입력 인자 st가 가리키는 값',
                     'g_flag': '전역/외부 값'}, vals
     assert bc.values(bc.need(d[8], 'T'), p[3])['st->n'] == '함수 안에서 계산 (L6)'
     # 채우는 법의 줄들을 그대로 TC로 쓰면 그 분기가 채워진다
     tc = '\n'.join(bc.tc_line(i, x, o) for i, (x, o) in enumerate(bc.need(d[7], 'T'), 1))
     assert (d[7], 'T') in bc.analyze('', tc, parsed=p)['cov'], tc
+
+
+H_SRC = r'''
+#define LIMIT 10
+typedef enum { ST_IDLE, ST_RUN = 5, ST_STOP } st_e;
+float get_temp(void);
+int h(float t, unsigned char n, st_e s)
+{
+    int ret = Stub_Read();
+    if (t >= 25.5f && n < LIMIT) { return 1; }
+    if (s == ST_RUN || ret != 0) { n++; }
+    if (get_temp() > 30) { return 2; }
+    return 0;
+}
+'''
+
+
+def test_bva():
+    import csv
+    import os
+    import tempfile
+    import bva
+    src = open('example.c', encoding='utf-8').read()
+    p = bc.parse(bc.strip_code(src), 'example')
+    m = bva.Model(p, [src])
+    tcs, manual = m.generate()
+    # case 5개 + x>3 T/F 가 둘 다 case 2 → 최소 6개. while(r>100)은 r이 함수 안 계산값이라 수동
+    assert len(tcs) == 6, len(tcs)
+    assert sorted((d.line, o) for d, o in manual) == [(35, 'F'), (35, 'T')], manual
+    assert all('계산' in why for why in manual.values())
+    # 모든 자동 분기를 경계로 채운다: T와 F가 경계 한 칸 차이
+    got = set().union(*(g for _, _, g in tcs))
+    assert len(got) == 13
+    by = {(d.line, o): V for V, _, g in tcs for d, o in g}
+    assert by[(23, 'T')]['x'] == 4 and by[(23, 'F')]['x'] == 3
+    assert by[(12, 'T')]['c'] == 9 and by[(12, 'F')]['c'] == 10
+    assert by[(6, 'T')]['a'] == 1 and by[(6, 'F')]['a'] in (0, 2)
+    # 만든 TC 표기를 다시 읽으면 while 말고 다 채워진다
+    r = bc.analyze('', m.tc_text(tcs), parsed=p)
+    assert sorted((ln, o) for ln, _, o in r['missing']) == [(35, 'F'), (35, 'T')] and not r['warns'], r
+    # CSV: 머리줄 + TC 6줄
+    path = os.path.join(tempfile.mkdtemp(), 'bva.csv')
+    m.write_csv(path, tcs)
+    rows = list(csv.reader(open(path, encoding='utf-8-sig')))
+    assert rows[0] == ['TC', 'a', 'c', 'x', 'mode', '경계로 채운 분기'] and len(rows) == 7, rows
+
+    # float은 0.1, unsigned는 음수 없음, #define·enum 값, stub 반환값을 받은 지역 변수
+    p = bc.parse(bc.strip_code(H_SRC))
+    m = bva.Model(p, [H_SRC])
+    assert {v: (m.isf[v], m.uns[v]) for v in m.cols} == {
+        't': (True, False), 'n': (False, True), 's': (False, False),
+        'Stub_Read()': (False, False), 'get_temp()': (True, False)}
+    tcs, manual = m.generate()
+    assert not manual and len(tcs) == 3, (len(tcs), manual)
+    vals = {(d.line, o): V for V, _, g in tcs for d, o in g}
+    assert vals[(8, 'T')]['t'] == 25.5 and vals[(8, 'F')]['t'] == 25.4, vals
+    assert vals[(10, 'T')]['get_temp()'] == 30.1 and vals[(10, 'F')]['get_temp()'] == 30
+    assert all(V['n'] >= 0 for V, _, _ in tcs)
+
+    # 명령줄: CSV 저장, 화면에 이름이 안 나온다
+    d = tempfile.mkdtemp()
+    c_path = os.path.join(d, 'secret_mod.c')
+    open(c_path, 'w', encoding='utf-8').write(C_SRC)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path, '--func', 'secret_func', '--csv', os.path.join(d, 'secret.csv')]) == 0
+    assert 'secret' not in buf.getvalue().lower() and '경계값 TC' in buf.getvalue(), buf.getvalue()
+    assert os.path.exists(os.path.join(d, 'secret.csv'))
 
 
 def test_gui():
@@ -161,6 +230,15 @@ def test_gui():
     app.add_tc()
     app.refresh()
     assert '15/15' in app.status['text'] and len(app.result['tcs']) == 5, app.status['text']
+    # 경계값 TC: 빈 칸에서 만들면 while 2개만 남고 수동 이유가 경고 목록에 나온다
+    import os
+    import tempfile
+    app.text.delete('1.0', 'end')
+    path = os.path.join(tempfile.mkdtemp(), 'b.csv')
+    app.make_bva(path)
+    assert os.path.exists(path) and len(app.result['tcs']) == 6, len(app.result['tcs'])
+    assert '13/15' in app.status['text'], app.status['text']
+    assert any('경계값 수동' in x for x in app.warn.get(0, 'end'))
     root.destroy()
 
 

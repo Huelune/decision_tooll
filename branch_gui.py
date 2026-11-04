@@ -4,6 +4,8 @@
 오른쪽에서 빨간 줄(못 채운 분기)을 더블클릭하면 커서가 있는 TC에 그 줄을 넣는다.
 분기를 고르면 아래에 채우는 법(꼭 거쳐야 할 분기, 조건에 쓰인 값의 출처)이 나오고,
 [새 TC로 추가]는 그 경로를 새 TC 블록으로 붙인다. 다른 함수 호출은 stub으로 본다.
+[경계값 TC 만들기]는 경계 바로 양쪽 값으로 되도록 적은 TC를 만들어 입력값은 CSV로 저장하고
+TC 표기는 왼쪽 끝에 붙인다. 같은 폴더의 .h에서 #define·enum 값과 형을 찾는다.
 이 창에는 조건문 원문이 보이므로 캡처해서 밖으로 보내지 않는다.
 """
 import argparse
@@ -14,6 +16,7 @@ import traceback
 from tkinter import filedialog, messagebox, ttk
 
 import branch_cov as bc
+import bva
 
 ALL = '(전체)'
 
@@ -21,7 +24,7 @@ ALL = '(전체)'
 class App:
     def __init__(self, root, c_path=None, func=None):
         self.root, self.src, self.parsed, self.tc_path, self.saved = root, '', None, None, ''
-        self.job, self.rows, self.result = None, {}, None
+        self.job, self.rows, self.result, self.headers, self.manual = None, {}, None, [], {}
         root.title('분기 커버리지 도우미')
         root.geometry('1100x700')
 
@@ -34,6 +37,7 @@ class App:
         self.func.bind('<<ComboboxSelected>>', lambda e: self.set_func())
         ttk.Button(top, text='TC 열기', command=self.open_tc).pack(side='left', padx=(12, 0))
         ttk.Button(top, text='TC 저장', command=self.save_tc).pack(side='left')
+        ttk.Button(top, text='경계값 TC 만들기', command=self.make_bva).pack(side='left', padx=(12, 0))
         self.only_miss = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text='못 채운 것만', variable=self.only_miss,
                         command=self.refresh).pack(side='left', padx=12)
@@ -81,6 +85,7 @@ class App:
     def load_c(self, path, func=None):
         try:
             self.src = bc._read(path)
+            self.headers = bc.headers_near(path)
             funcs = bc.parse(bc.strip_code(self.src))[2]
         except OSError:
             messagebox.showerror('C 파일', '파일을 열 수 없음 — 경로를 확인하세요')
@@ -99,7 +104,35 @@ class App:
         except Exception:
             self.parse_failed()
             return
+        self.manual = {}
         self.refresh()
+
+    def make_bva(self, csv_path=None):
+        """경계값 TC를 만들어 입력값은 CSV로 저장하고, TC 표기는 왼쪽 끝에 붙인다."""
+        if not self.parsed:
+            return
+        try:
+            m = bva.Model(self.parsed, [self.src] + self.headers)
+            tcs, self.manual = m.generate()
+        except Exception:
+            with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
+                f.write(traceback.format_exc())
+            messagebox.showerror('경계값 TC', f'만들다 실패함 — 상세: %TEMP%\\{bc.REPORT}')
+            return
+        path = csv_path or filedialog.asksaveasfilename(title='경계값 TC 입력값 저장', defaultextension='.csv',
+                                                        filetypes=[('CSV', '*.csv')], initialfile='boundary_tc.csv')
+        if path:
+            try:
+                m.write_csv(path, tcs)
+            except OSError:
+                messagebox.showerror('CSV', '파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지 확인하세요')
+        body = self.tc_text().rstrip()
+        self.text.insert('end', ('\n\n' if body else '') + m.tc_text(tcs))
+        self.text.see('end')
+        self.refresh()
+        if not csv_path:
+            messagebox.showinfo('경계값 TC', f'TC {len(tcs)}개를 만들었습니다.\n'
+                                         f'자동으로 못 만든 분기 {len(self.manual)}개는 아래 목록에 이유가 있습니다.')
 
     def parse_failed(self):
         with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
@@ -181,6 +214,8 @@ class App:
         self.warn.delete(0, 'end')
         for n, dno, msg, detail in r['warns']:
             self.warn.insert('end', f'TC{n} D{dno}: {msg}' + (f'   | {detail}' if detail else ''))
+        for (d, o), why in self.manual.items():
+            self.warn.insert('end', f'경계값 수동  L{d.line_of(o)} {d.kind} {o}: {why}')
 
     # --- 채우는 법 ---
     def picked(self):

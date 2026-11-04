@@ -1,6 +1,6 @@
 """실행 전 분기 커버리지 추정기 (C, decision coverage).
 
-사용: python branch_cov.py <C 파일> <TC 표기 파일> [--func 함수이름]
+사용: python branch_cov.py <C 파일> [TC 표기 파일] [--func 함수이름] [--csv 경계값TC.csv]
 
 TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형식
 (if / else if / elseif / else / case / default / while / for).
@@ -11,6 +11,7 @@ TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형�
 """
 import argparse
 import bisect
+import glob
 import os
 import re
 import sys
@@ -296,8 +297,16 @@ def assignments(toks, T, line):
                    or (T(e) != '' and T(e) in '+-*/%&|^' and op(e + 1, '='))
                    or op(e, '<<=') or op(e, '>>=') or op(e, '++') or op(e, '--')
                    or op(b - 2, '++') or op(b - 2, '--'))
+        call = None   # v = f(...); 처럼 stub 반환값을 그대로 받는가
+        if T(e) == '=' and _is_ident(T(e + 1)) and T(e + 2) == '(':
+            d, j = 0, e + 2
+            for j in range(e + 2, len(toks)):
+                d += (T(j) == '(') - (T(j) == ')')
+                if d == 0:
+                    break
+            call = T(e + 1) if T(j + 1) == ';' else None
         if changed:
-            out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), by_ref))
+            out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), by_ref, call))
     return out
 
 
@@ -326,7 +335,7 @@ def tc_key(text):
 def read_tcs(text):
     tcs = []
     for block in re.split(r'\n\s*\n', text.strip()):
-        lines = [x for x in block.splitlines() if x.strip()]
+        lines = [x for x in block.splitlines() if x.strip() and not x.lstrip().startswith(('#', '//'))]  # 주석 줄
         tc = {'name': '', 'items': [], 'bad': []}
         for i, x in enumerate(lines):
             m = TC_LINE.match(x)
@@ -432,23 +441,28 @@ def values(path, info):
             if (t in out or base in C_WORDS or base.isupper() or base.endswith('_t')
                     or c[max(m.start() - 1, 0):m.start()] == '.' or c[max(m.start() - 2, 0):m.start()] == '->'):
                 continue
-            if c[m.end():m.end() + 1] == '(':
-                out[t] = 'stub 반환값'
-                continue
-            sets = sorted((k, ln, ref) for p, hits in info['set'].items()
-                          if t == p or t.startswith(p + '.') or t.startswith(p + '->')
-                          for k, ln, ref in hits if a < k < d.pos)
-            sets = [(ln, ref) for _, ln, ref in sets]
-            lines = ', '.join(f'L{ln}' for ln, _ in sets[-3:])
-            if any(ref for _, ref in sets):
-                out[t] = f'stub이 &로 채움 ({lines})'
-            elif sets:
-                out[t] = f'함수 안에서 계산 ({lines})'
-            elif base in ps:
-                out[t] = '입력 인자' if t == base else f'입력 인자 {base}가 가리키는 값'
-            else:
-                out[t] = '전역/외부 값'
+            out[t] = 'stub 반환값' if c[m.end():m.end() + 1] == '(' else source_of(t, d, info)[0]
     return out
+
+
+def source_of(t, d, info):
+    """결정문 d의 조건에 쓰인 이름 t(멤버 경로 포함)의 값 출처.
+    (설명, 경계값 TC의 열 이름 — 테스트에서 직접 넣을 수 없으면 None)"""
+    a, _b = info['body'].get(d.func, (0, 0))
+    base = re.match(r'\w+', t).group()
+    hits = sorted(h for p, hs in info['set'].items()
+                  if t == p or t.startswith(p + '.') or t.startswith(p + '->')
+                  for h in hs if a < h[0] < d.pos)
+    lines = ', '.join(f'L{h[1]}' for h in hits[-3:])
+    if any(h[2] for h in hits):
+        return f'stub이 &로 채움 ({lines})', f'{t} (stub &출력)'
+    if len(hits) == 1 and hits[0][3]:
+        return f'{hits[0][3]} stub 반환값 ({lines})', hits[0][3] + '()'
+    if hits:
+        return f'함수 안에서 계산 ({lines})', None
+    if base in info['params'].get(d.func, set()):
+        return ('입력 인자' if t == base else f'입력 인자 {base}가 가리키는 값'), t
+    return '전역/외부 값', t
 
 
 def tc_line(i, d, o):
@@ -523,8 +537,9 @@ def _read(path):
 def main(argv=None):
     ap = argparse.ArgumentParser(description='실행 전 분기 커버리지 추정 (C)')
     ap.add_argument('c_file')
-    ap.add_argument('tc_file')
+    ap.add_argument('tc_file', nargs='?', help='없으면 TC 없이 분기만 센다')
     ap.add_argument('--func', help='이 함수만 본다')
+    ap.add_argument('--csv', help='경계값 TC 입력값을 이 CSV로 저장 (TC 표기는 상세 파일에)')
     a = ap.parse_args(argv)
     os.system('cls' if os.name == 'nt' else 'clear')  # 고정 문자열이라 주입 위험 없음
     rpt = os.path.join(tempfile.gettempdir(), REPORT)
@@ -534,14 +549,19 @@ def main(argv=None):
         print('오류: C 파일을 열 수 없음 — 경로를 확인하세요')
         return 1
     try:
-        tc_text = _read(a.tc_file)
+        tc_text = _read(a.tc_file) if a.tc_file else ''
     except OSError:
         print('오류: TC 표기 파일을 열 수 없음 — 경로를 확인하세요')
         return 1
     try:
-        r = analyze(src, tc_text, a.func)
+        parsed = parse(strip_code(src), a.func)
+        r = analyze('', tc_text, parsed=parsed)
+        extra = make_bva(parsed, [src] + headers_near(a.c_file), a.csv) if a.csv else None
     except LookupError:
         print('오류: --func 로 준 함수를 C 파일에서 못 찾음 — 함수 이름을 확인하세요')
+        return 1
+    except OSError:
+        print('오류: CSV 파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지, 폴더가 있는지 확인하세요')
         return 1
     except Exception:
         with open(rpt, 'w', encoding='utf-8') as f:
@@ -550,9 +570,33 @@ def main(argv=None):
         print(f'상세: %TEMP%\\{REPORT}')
         return 1
     with open(rpt, 'w', encoding='utf-8') as f:
-        f.write(render_report(r))
+        f.write(render_report(r) + (extra[2] if extra else ''))
     print(render_screen(r))
+    if extra:
+        print(f'경계값 TC {extra[0]}개 → CSV 저장 / 자동으로 못 만든 분기 {extra[1]}개 (이유와 TC 표기는 상세 파일)')
     return 0
+
+
+def headers_near(c_path):
+    """C 파일과 같은 폴더의 .h (상수 값과 형을 찾는 데만 쓴다)."""
+    out = []
+    for h in glob.glob(os.path.join(os.path.dirname(os.path.abspath(c_path)), '*.h')):
+        try:
+            out.append(_read(h))
+        except OSError:
+            pass
+    return out
+
+
+def make_bva(parsed, srcs, csv_path):
+    """경계값 TC를 만들어 CSV로 쓴다 → (TC 수, 수동 분기 수, 상세 보고서에 붙일 글)."""
+    import bva
+    m = bva.Model(parsed, srcs)
+    tcs, manual = m.generate()
+    m.write_csv(csv_path, tcs)
+    text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
+    text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
+    return len(tcs), len(manual), '\n'.join(text) + '\n'
 
 
 if __name__ == '__main__':
