@@ -2,6 +2,7 @@
 name = "decision-tool"
 version = "0.1.0"
 description = "Offline C decision-coverage estimation and boundary-case helper"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
@@ -24,4 +25,4 @@ line-length = 100
 select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.uv.build-backend]
-source-include = ["tests/**", "examples/**"]
+source-include = ["tests/**", "examples/**", "scripts/**", "CONTRIBUTING.md", "start.cmd"]

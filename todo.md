@@ -4,11 +4,11 @@
 
 ## 4. 경계값 TC 만들기 써 보기
 
-왜: 경계 바로 양쪽 값(정수 ±1, float ±0.1)으로 만든 최소 TC가 실제 코드에서도 맞게 나오는지 본다.
+왜: 경계 바로 양쪽 값(정수 ±1, float ±0.1)으로 만든 적게 묶은 TC 후보가 실제 코드에서도 맞게 나오는지 본다.
 
 ```
-cd /d D:\codes\decision_tooll
-python branch_gui.py example.c --func example
+uv sync --locked
+uv run --locked decision-tool-gui examples/example.c --func example
 ```
 
 - [경계값 TC 만들기]를 누르고 CSV 저장 위치를 고른다. 예시는 TC 6개, 수동 2개(while — r이 함수 안 계산값)가
@@ -29,8 +29,8 @@ python branch_gui.py example.c --func example
 왜: TC 표기를 쓰는 동안 못 채운 분기가 바로 보이는지, 쓰기 불편한 곳은 없는지 본다.
 
 ```
-cd /d D:\codes\decision_tooll
-python branch_gui.py example.c --func example
+uv sync --locked
+uv run --locked decision-tool-gui examples/example.c --func example
 ```
 
 - 왼쪽에 `example_tc.txt` 내용을 붙여 넣거나 [TC 열기]로 연다. 오른쪽 위에 13/15가 나와야 한다.
@@ -51,8 +51,8 @@ python branch_gui.py example.c --func example
 입력값(a, c, x, mode)으로 TC 4개를 만들어 돌린다. 그다음 아래를 돌린다.
 
 ```
-cd /d D:\codes\decision_tooll
-python branch_cov.py example.c example_tc.txt --func example
+uv sync --locked
+uv run --locked decision-tool examples/example.c examples/example_tc.txt --func example
 ```
 
 이 도구의 예상: 분기 결과 15개 중 13개를 채움. 못 채운 분기는 L23 `if (x > 3)` T와 L27 `case 3`.
@@ -74,8 +74,8 @@ python branch_cov.py example.c example_tc.txt --func example
 블록 첫 줄에 TC 이름을 적어도 된다(화면에는 TC1, TC2 순번만 나온다).
 
 ```
-cd /d D:\codes\decision_tooll
-python branch_cov.py <C 파일 경로> <TC 표기 파일 경로> --func <대상 함수 이름>
+uv sync --locked
+uv run --locked decision-tool <C 파일 경로> <TC 표기 파일 경로> --func <대상 함수 이름>
 ```
 
 확인할 것:
