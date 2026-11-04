@@ -18,6 +18,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import analysis as bc
 from . import boundary as bva
+from .console import configure_output
 from .storage import REPORT, headers_near, read_text
 
 ALL = "(전체)"
@@ -325,6 +326,7 @@ class App:
 
 
 def main():
+    configure_output()
     ap = argparse.ArgumentParser(description="TC 표기 작성 도우미")
     ap.add_argument("c_file", nargs="?")
     ap.add_argument("--func")

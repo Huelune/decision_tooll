@@ -6,11 +6,13 @@ import tempfile
 import traceback
 
 from .analysis import analyze, parse, strip_code
+from .console import configure_output
 from .reports import render_report, render_screen
 from .storage import REPORT, headers_near, read_text
 
 
 def main(argv=None):
+    configure_output()
     ap = argparse.ArgumentParser(description="실행 전 분기 커버리지 추정 (C)")
     ap.add_argument("c_file")
     ap.add_argument("tc_file", nargs="?", help="없으면 TC 없이 분기만 센다")
