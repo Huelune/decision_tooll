@@ -73,7 +73,7 @@ class Model:
                     raise Manual(d.uncertain)
                 if (
                     d.in_loop
-                    or d.kind == "dowhile"
+                    or d.kind in ("for", "dowhile")
                     or any(
                         p.func == d.func and p.pos < d.pos and p.kind in LOOPS for p in self.decs
                     )

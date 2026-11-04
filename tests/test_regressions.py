@@ -56,6 +56,12 @@ class Expressions(unittest.TestCase):
         m = model("int f(unsigned n){if(n > -1)return 1;return 0;}")
         self.assertEqual(len(m.generate()[1]), 2)
 
+    def test_large_enum_shift_is_rejected_before_generation(self):
+        m = model("enum { LIMIT = 1 << 10000000000 }; int f(int n){if(n<LIMIT)return 1;}")
+        tcs, manual = m.generate()
+        self.assertFalse(tcs)
+        self.assertEqual(len(manual), 2)
+
 
 class Coverage(unittest.TestCase):
     def test_loops_do_not_infer_false_from_true(self):
@@ -72,6 +78,7 @@ class Coverage(unittest.TestCase):
         for source in [
             "int f(int n){do{return 1;}while(n>0);}",
             "int f(int n){while(n>0){if(n>1)return 1;}return 0;}",
+            "int f(void){for(int i=0;i<10;i++){}return 0;}",
         ]:
             m = model(source)
             _, manual = m.generate()
