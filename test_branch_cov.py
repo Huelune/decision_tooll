@@ -95,9 +95,42 @@ def test():
                               parsed=bc.parse(bc.strip_code(open('example.c', encoding='utf-8').read())))
             assert any(k[1] == o and k[0].line == d.line for k in hits['cov']), (d.line, o)
 
+    test_howto()
     test_gui()
     print('OK')
     print(screen)
+
+
+G_SRC = r'''
+int g(int p, int q, struct s_t *st)
+{
+    int v = get_val(&q);
+    if (p == 0) return -1;
+    if (stub_ok() && v > q) { st->n = 1; }
+    else if (st->mode == 2 && g_flag) return 2;
+    if (st->n > 0) { v++; }
+    return 0;
+}
+'''
+
+
+def test_howto():
+    p = bc.parse(bc.strip_code(G_SRC))
+    d = {x.line: x for x in p[0]}
+    # 조기 반환: 뒤 분기들은 p==0 F 를 요구하고, else if 가 return 하는 사슬 뒤에는 요구가 생기지 않는다
+    assert d[7].reqs() == [(d[6], 'F'), (d[5], 'F')] and d[8].reqs() == [(d[5], 'F')], d[8].reqs()
+    # 뒤 분기를 적으면 조기 반환을 피한 결과(p==0 F)도 채워진다
+    r = bc.analyze('', 'D1 [T] if(st->n > 0)', parsed=p)
+    assert r['cov'][(d[5], 'F')] == ['TC1*'], r['cov']
+    assert [(x.line, o) for x, o in bc.need(d[7], 'T')] == [(5, 'F'), (6, 'F'), (7, 'T')]
+    vals = bc.values(bc.need(d[7], 'T'), p[3])
+    assert vals == {'p': '입력 인자', 'stub_ok': 'stub 반환값', 'v': '함수 안에서 계산 (L4)',
+                    'q': 'stub이 &로 채움 (L4)', 'st->mode': '입력 인자 st가 가리키는 값',
+                    'g_flag': '전역/외부 값'}, vals
+    assert bc.values(bc.need(d[8], 'T'), p[3])['st->n'] == '함수 안에서 계산 (L6)'
+    # 채우는 법의 줄들을 그대로 TC로 쓰면 그 분기가 채워진다
+    tc = '\n'.join(bc.tc_line(i, x, o) for i, (x, o) in enumerate(bc.need(d[7], 'T'), 1))
+    assert (d[7], 'T') in bc.analyze('', tc, parsed=p)['cov'], tc
 
 
 def test_gui():
@@ -120,6 +153,14 @@ def test_gui():
     app.only_miss.set(True)
     app.refresh()
     assert len(app.tree.get_children()) == 1  # 남은 건 switch 하나
+    # case 3 을 고르면 채우는 법이 나오고, 새 TC로 넣으면 100%
+    iid = next(i for i, (d, o) in app.rows.items() if o == 'case 3')
+    app.tree.selection_set(iid)
+    app.show_how()
+    assert 'D1 [T] case 3:' in app.how.get('1.0', 'end'), app.how.get('1.0', 'end')
+    app.add_tc()
+    app.refresh()
+    assert '15/15' in app.status['text'] and len(app.result['tcs']) == 5, app.status['text']
     root.destroy()
 
 

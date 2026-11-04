@@ -2,6 +2,8 @@
 
 왼쪽에 TC 표기를 쓰면 오른쪽에 분기마다 채운 TC와 아직 못 채운 분기가 바로 나온다.
 오른쪽에서 빨간 줄(못 채운 분기)을 더블클릭하면 커서가 있는 TC에 그 줄을 넣는다.
+분기를 고르면 아래에 채우는 법(꼭 거쳐야 할 분기, 조건에 쓰인 값의 출처)이 나오고,
+[새 TC로 추가]는 그 경로를 새 TC 블록으로 붙인다. 다른 함수 호출은 stub으로 본다.
 이 창에는 조건문 원문이 보이므로 캡처해서 밖으로 보내지 않는다.
 """
 import argparse
@@ -42,19 +44,30 @@ class App:
         pw.pack(fill='both', expand=True)
         self.text = tk.Text(pw, width=50, undo=True, font=('Consolas', 11))
         pw.add(self.text, weight=1)
-        self.tree = ttk.Treeview(pw, columns=('tc',), show='tree headings')
+        right = ttk.PanedWindow(pw, orient='vertical')
+        pw.add(right, weight=1)
+        self.tree = ttk.Treeview(right, columns=('tc',), show='tree headings')
         self.tree.heading('#0', text='분기 (빨간 줄 더블클릭 → 왼쪽에 추가)')
         self.tree.heading('tc', text='채운 TC (* = 추론)')
         self.tree.column('#0', width=380)
         self.tree.column('tc', width=180)
         self.tree.tag_configure('miss', foreground='red')
         self.tree.tag_configure('done', foreground='gray50')
-        pw.add(self.tree, weight=1)
+        right.add(self.tree, weight=3)
+        box = ttk.Frame(right)
+        right.add(box, weight=2)
+        bar = ttk.Frame(box)
+        bar.pack(fill='x')
+        ttk.Label(bar, text='채우는 법 (분기를 고르면 나옴)').pack(side='left')
+        ttk.Button(bar, text='새 TC로 추가', command=self.add_tc).pack(side='right')
+        self.how = tk.Text(box, height=10, font=('Consolas', 10), state='disabled', bg='#f7f7f7')
+        self.how.pack(fill='both', expand=True)
         self.warn = tk.Listbox(root, height=6, fg='darkorange3')
         self.warn.pack(fill='x')
 
         self.text.bind('<<Modified>>', self.on_edit)
         self.tree.bind('<Double-1>', self.insert_line)
+        self.tree.bind('<<TreeviewSelect>>', lambda e: self.show_how())
         root.protocol('WM_DELETE_WINDOW', self.close)
         if c_path:
             self.load_c(c_path, func)
@@ -168,6 +181,32 @@ class App:
         self.warn.delete(0, 'end')
         for n, dno, msg, detail in r['warns']:
             self.warn.insert('end', f'TC{n} D{dno}: {msg}' + (f'   | {detail}' if detail else ''))
+
+    # --- 채우는 법 ---
+    def picked(self):
+        sel = self.tree.selection()
+        return self.rows.get(sel[0] if sel else self.tree.focus(), (None, None))
+
+    def show_how(self):
+        d, o = self.picked()
+        self.how.configure(state='normal')
+        self.how.delete('1.0', 'end')
+        if d is not None:
+            self.how.insert('1.0', '\n'.join(bc.howto(d, o, self.result['info'])))
+        self.how.configure(state='disabled')
+
+    def add_tc(self):
+        """고른 분기까지 꼭 거쳐야 하는 줄들을 새 TC 블록으로 맨 끝에 붙인다."""
+        d, o = self.picked()
+        if d is None:
+            return
+        name = f"새 TC  L{d.line_of(o)} {bc._kind(d, o)} {'' if d.kind == 'switch' else o}".rstrip()
+        lines = [name] + [bc.tc_line(i, pd, po) for i, (pd, po) in enumerate(bc.need(d, o), 1)]
+        body = self.tc_text().rstrip()
+        self.text.delete('1.0', 'end')
+        self.text.insert('1.0', (body + '\n\n' if body else '') + '\n'.join(lines) + '\n')
+        self.text.mark_set('insert', 'end-1c')
+        self.text.see('end')
 
     # --- 못 채운 분기를 왼쪽에 넣기 ---
     def insert_line(self, _):
