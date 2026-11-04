@@ -95,6 +95,14 @@ def test():
                               parsed=bc.parse(bc.strip_code(open('example.c', encoding='utf-8').read())))
             assert any(k[1] == o and k[0].line == d.line for k in hits['cov']), (d.line, o)
 
+    # [T/F]: 반복문처럼 한 TC에서 둘 다 탐. 반복문이 아닌 if에 쓰면 경고
+    p = bc.parse(bc.strip_code(open('example.c', encoding='utf-8').read()), 'example')
+    r = bc.analyze('', 'D1 [T / f] while(r > 100)\nD2 [T/F] if(a==1)', parsed=p)
+    w = {x.line: x for x in p[0]}
+    assert {(d.line, o) for d, o in r['cov']} == {(35, 'T'), (35, 'F'), (6, 'T'), (6, 'F')}, r['cov']
+    assert [m for _, _, m, _ in r['warns']] == ['L6 결정문에 서로 다른 결과가 함께 적힘'], r['warns']
+    assert r['cov'][(w[35], 'F')] == ['TC1']
+
     test_howto()
     test_bva()
     test_gui()
@@ -190,6 +198,14 @@ def test_bva():
     assert vals[(8, 'T')]['t'] == 25.5 and vals[(8, 'F')]['t'] == 25.4, vals
     assert vals[(10, 'T')]['get_temp()'] == 30.1 and vals[(10, 'F')]['get_temp()'] == 30
     assert all(V['n'] >= 0 for V, _, _ in tcs)
+
+    # 입력으로 정해지는 반복문: 들어가는 TC는 [T/F]로 적고 F도 채운 것으로 본다
+    w_src = 'int w(int n) { while (n > 0) { n--; } return n; }'
+    p = bc.parse(bc.strip_code(w_src))
+    m = bva.Model(p, [w_src])
+    tcs, manual = m.generate()
+    assert not manual and len(tcs) == 1 and '[T/F] while(n > 0)' in m.tc_text(tcs), m.tc_text(tcs)
+    assert len(bc.analyze('', m.tc_text(tcs), parsed=p)['missing']) == 0
 
     # 명령줄: CSV 저장, 화면에 이름이 안 나온다
     d = tempfile.mkdtemp()

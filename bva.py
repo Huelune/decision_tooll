@@ -19,6 +19,7 @@ TOK = re.compile(rf'\s*({NUM}|[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)*|&&|\|
 OPS = {'&&': 'and', '||': 'or', '!': 'not', '==': '==', '!=': '!=', '<': '<', '>': '>', '<=': '<=',
        '>=': '>=', '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '&': '&', '|': '|', '^': '^',
        '~': '~', '<<': '<<', '>>': '>>', '(': '(', ')': ')'}
+LOOPS = ('while', 'for', 'dowhile')
 LIMIT = 20000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
 
 
@@ -262,6 +263,7 @@ class Model:
             full = {v: V.get(v, 0) for v in self.cols}
             res = self.run(full)
             got = {t for t in todo if res.get(t[0]) == t[1] and self.boundary(*t, Defaults(full))}
+            got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in todo}
             manual.update((t, '값은 찾았지만 실제 경로가 달라짐 (확인 필요)') for t in bnd - got)
             tcs.append((full, res, got))
             todo = [t for t in todo if t not in got and t not in bnd]
@@ -280,10 +282,14 @@ class Model:
                 if d not in res:
                     continue
                 if res[d] is None:
-                    lines.append(f'# L{d.line} {d.kind}: 직접 확인 ({self.manual.get(d, "결과 모름")})')
+                    hint = ' — 들어가면 [T/F], 안 들어가면 [F]' if d.kind in LOOPS else ''
+                    lines.append(f'# L{d.line} {d.kind}: 직접 확인 ({self.manual.get(d, "결과 모름")}){hint}')
                     continue
                 i += 1
-                lines.append(bc.tc_line(i, d, res[d]))
+                line = bc.tc_line(i, d, res[d])
+                if res[d] == 'T' and d.kind in LOOPS:   # 반복문에 들어가면 끝날 때 F도 탄다
+                    line = line.replace('[T]', '[T/F]', 1)
+                lines.append(line)
             blocks.append('\n'.join(lines))
         return '\n\n'.join(blocks) + '\n'
 

@@ -21,7 +21,7 @@ import traceback
 REPORT = 'branch_cov_report.txt'
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
-TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf])\s*\]\s*(.+?)\s*$')
+TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
 
 
 def norm(s):
@@ -340,7 +340,7 @@ def read_tcs(text):
         for i, x in enumerate(lines):
             m = TC_LINE.match(x)
             if m:
-                tc['items'].append((m.group(1) or '?', m.group(2).upper(), m.group(3)))
+                tc['items'].append((m.group(1) or '?', re.sub(r'[\s/]', '', m.group(2).upper()), m.group(3)))
             elif i == 0:
                 tc['name'] = x.strip()
             else:
@@ -389,8 +389,8 @@ def analyze(c_src, tc_text, func=None, parsed=None):
                 warns.append((n, dno, '같은 분기가 여러 곳, 순서로 못 가림 (첫 번째로 셈)', text))
             pos, d, o = after[0] if after else cands[0]
             prev, matched = pos, matched + 1
-            outcome = tf if o is None else (o if tf == 'T' else None)  # case [F]는 평가만 됨
-            if outcome:
+            # tf: 'T' / 'F' / 'TF'(반복문처럼 둘 다 탐). case·else 는 T일 때만 그 결과, [F]는 평가만 됨
+            for outcome in (dict.fromkeys(tf) if o is None else [o] if 'T' in tf else []):
                 got.setdefault(d, {})[outcome] = True
             imply(d)
 
