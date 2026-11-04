@@ -134,7 +134,7 @@ def test_howto():
     assert [(x.line, o) for x, o in bc.need(d[7], 'T')] == [(5, 'F'), (6, 'F'), (7, 'T')]
     vals = bc.values(bc.need(d[7], 'T'), p[3])
     assert vals == {'p': '입력 인자', 'stub_ok': 'stub 반환값', 'v': 'get_val stub 반환값 (L4)',
-                    'q': 'stub이 &로 채움 (L4)', 'st->mode': '입력 인자 st가 가리키는 값',
+                    'q': '입력 인자', 'st->mode': '입력 인자 st가 가리키는 값',   # &q 로 넘겨도 안 바뀜
                     'g_flag': '전역/외부 값'}, vals
     assert bc.values(bc.need(d[8], 'T'), p[3])['st->n'] == '함수 안에서 계산 (L6)'
     # 채우는 법의 줄들을 그대로 TC로 쓰면 그 분기가 채워진다

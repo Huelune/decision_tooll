@@ -76,7 +76,7 @@ def parse(clean, func=None):
     decs, keys, funcs = [], {}, []
     guards = []   # 지금 위치에서 유효한 조기 반환 회피 조건 (블록을 나가면 줄어든다)
     cur = {'func': None}
-    info = {'params': {}, 'body': {}, 'set': {}}   # set: 이름 -> [(토큰 위치, 줄, &로 넘김?)]
+    info = {'params': {}, 'body': {}, 'set': {}}   # set: 이름 -> [(토큰 위치, 줄, 받은 stub 이름 또는 None)]
 
     def T(k):
         return toks[k][0] if 0 <= k < len(toks) else ''
@@ -265,7 +265,7 @@ def _is_ident(t):
 
 
 def assignments(toks, T, line):
-    """값이 바뀌는 곳: 'a' / 'p->b' / 's.x' -> [(토큰 위치, 줄, &로 함수에 넘김?)]. a[i] 는 a 로 센다."""
+    """값이 바뀌는 곳: 'a' / 'p->b' / 's.x' -> [(토큰 위치, 줄, v = f(); 면 f)]. a[i] 는 a 로 센다."""
     def op(k, s):  # k부터 붙어 있는 문자 토큰이 s인가
         return all(T(k + i) == c for i, c in enumerate(s)) and \
             all(toks[k + i][1] == toks[k][1] + i for i in range(len(s)) if k + i < len(toks))
@@ -292,8 +292,8 @@ def assignments(toks, T, line):
             e += 1
         if T(e) == '.' or op(e, '->'):
             continue  # 더 긴 멤버 접근의 앞부분
-        by_ref = T(b - 1) == '&' and T(b - 2) in ('(', ',')
-        changed = (by_ref or (T(e) == '=' and T(e + 1) != '=')
+        # f(&x) 로 넘긴 값은 stub이 바꾸지 않는 것으로 본다 (대입으로 세지 않음)
+        changed = ((T(e) == '=' and T(e + 1) != '=')
                    or (T(e) != '' and T(e) in '+-*/%&|^' and op(e + 1, '='))
                    or op(e, '<<=') or op(e, '>>=') or op(e, '++') or op(e, '--')
                    or op(b - 2, '++') or op(b - 2, '--'))
@@ -306,7 +306,7 @@ def assignments(toks, T, line):
                     break
             call = T(e + 1) if T(j + 1) == ';' else None
         if changed:
-            out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), by_ref, call))
+            out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), call))
     return out
 
 
@@ -454,10 +454,8 @@ def source_of(t, d, info):
                   if t == p or t.startswith(p + '.') or t.startswith(p + '->')
                   for h in hs if a < h[0] < d.pos)
     lines = ', '.join(f'L{h[1]}' for h in hits[-3:])
-    if any(h[2] for h in hits):
-        return f'stub이 &로 채움 ({lines})', f'{t} (stub &출력)'
-    if len(hits) == 1 and hits[0][3]:
-        return f'{hits[0][3]} stub 반환값 ({lines})', hits[0][3] + '()'
+    if len(hits) == 1 and hits[0][2]:
+        return f'{hits[0][2]} stub 반환값 ({lines})', hits[0][2] + '()'
     if hits:
         return f'함수 안에서 계산 ({lines})', None
     if base in info['params'].get(d.func, set()):
