@@ -11,21 +11,13 @@ import csv
 import re
 
 import branch_cov as bc
+from c_expr import Expression, Manual, NUM, num
 
 FLOAT_T = r'(?:float|double|\w*[fF](?:32|64)\b|\w*(?:float|real)\w*)'
 UNSIGNED_T = r'(?:unsigned|uint\w*|u(?:8|16|32|64)\b|\w*_u(?:8|16|32|64)\w*|U(?:8|16|32|64)\w*|UINT\w*|bool\w*)'
 INT_T = r'(?:char|short|int|long|signed|unsigned|u?int\w*|[us](?:8|16|32|64)\b|[US](?:8|16|32|64)\w*|U?INT\w*|bool\w*)'
-NUM = r'0[xX][0-9a-fA-F]+[uUlL]*|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?[uUlLfF]*'
-TOK = re.compile(rf'\s*({NUM}|[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)*|&&|\|\||==|!=|<=|>=|<<|>>|\S)')
-OPS = {'&&': 'and', '||': 'or', '!': 'not', '==': '==', '!=': '!=', '<': '<', '>': '>', '<=': '<=',
-       '>=': '>=', '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '&': '&', '|': '|', '^': '^',
-       '~': '~', '<<': '<<', '>>': '>>', '(': '(', ')': ')'}
 LOOPS = ('while', 'for', 'dowhile')
 LIMIT = 20000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
-
-
-class Manual(Exception):
-    """자동으로 값을 못 정하는 조건. 메시지가 이유."""
 
 
 class Defaults(dict):
@@ -33,62 +25,8 @@ class Defaults(dict):
         return 0
 
 
-def num(s):
-    if s.lower().startswith('0x'):
-        return int(re.sub(r'[uUlL]+$', '', s), 16)
-    s = re.sub(r'[uUlLfF]+$', '', s)
-    return float(s) if re.search(r'[.eE]', s) else int(s)
-
-
-def translate(cond, consts, var_of=None):
-    """C 식 → (Python 식, 변수 열 이름들, 식에 나온 숫자들). var_of(이름, 함수호출?) → 열 이름 또는 Manual."""
-    c = re.sub(r'\(\s*(?:(?:unsigned|signed|const|volatile|struct|enum)\s+)*[A-Za-z_]\w*\s*\**\s*\)(?=\s*[\w(!~])',
-               ' ', cond)   # 형 변환 (uint8)x 제거
-    toks = TOK.findall(c)
-    out, vs, nums, i = [], [], [], 0
-    while i < len(toks):
-        t = toks[i]
-        i += 1
-        if re.fullmatch(NUM, t):
-            nums.append(num(t))
-            out.append(repr(num(t)))
-        elif re.match(r'[A-Za-z_]', t):
-            t = re.sub(r'\s+', '', t)
-            call = i < len(toks) and toks[i] == '('
-            if call:   # 인자는 보지 않는다 (stub)
-                d = 0
-                while i < len(toks):
-                    d += (toks[i] == '(') - (toks[i] == ')')
-                    i += 1
-                    if d == 0:
-                        break
-            if not call and t in consts:
-                nums.append(consts[t])
-                out.append(repr(consts[t]))
-                continue
-            if t == 'sizeof':
-                raise Manual('sizeof 식')
-            if not call and re.fullmatch(r'[A-Z][A-Z0-9_]*', t):
-                raise Manual(f'상수 값 모름 ({t})')
-            if var_of is None:
-                raise Manual(f'상수 값 모름 ({t})')
-            k = var_of(t, call)
-            if k not in vs:
-                vs.append(k)
-            out.append(f'V[{k!r}]')
-        elif t in OPS:
-            out.append(OPS[t])
-        else:
-            raise Manual(f'못 다루는 식 ({t})')
-    return ' '.join(out), vs, nums
-
-
 def const_eval(expr, consts):
-    src, _, _ = translate(expr, consts)
-    try:
-        return eval(src, {})  # translate가 숫자·연산자만 남긴 식이라 안전 (이름이 있으면 Manual)
-    except Exception:
-        raise Manual(f'상수 식 계산 실패 ({expr.strip()})')
+    return Expression(expr, consts)({})
 
 
 def constants(srcs):
@@ -97,7 +35,10 @@ def constants(srcs):
     for src in srcs:
         for m in re.finditer(rf'^[ \t]*#[ \t]*define[ \t]+(\w+)[ \t]+\(?[ \t]*(-?)[ \t]*({NUM})[ \t]*\)?'
                              r'[ \t]*(?://.*|/\*.*)?$', src, re.M):
-            out[m.group(1)] = (-1 if m.group(2) else 1) * num(m.group(3))
+            try:
+                out[m.group(1)] = (-1 if m.group(2) else 1) * num(m.group(3))
+            except Manual:
+                out.pop(m.group(1), None)
         for m in re.finditer(r'\benum\b[^{;]*\{([^}]*)\}', bc.strip_code(src)):
             v = -1
             for item in m.group(1).split(','):
@@ -120,10 +61,18 @@ class Model:
         text = '\n'.join(bc.strip_code(s) for s in srcs)
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
+        self.upper = {}
         for d in self.decs:
             try:
-                src, vs, nums = translate(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
-                f = eval('lambda V: ' + src, {})  # 숫자·연산자·V['열 이름']만 들어 있음 (translate 참고)
+                if d.uncertain:
+                    raise Manual(d.uncertain)
+                if d.in_loop or d.kind == 'dowhile' or any(
+                        p.func == d.func and p.pos < d.pos and p.kind in LOOPS for p in self.decs):
+                    raise Manual('반복 실행 또는 선행 반복문의 경로 확인 필요')
+                f = Expression(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
+                vs, nums = f.variables, list(f.numbers)
+                if any(self.declared(v, UNSIGNED_T, text) and not f.unsigned_safe(v) for v in vs):
+                    raise Manual('signed/unsigned 변환 규칙 확인 필요')
                 if d.kind == 'switch':
                     self.labels[d] = {lab: const_eval(lab[5:], self.consts) for lab, _ in d.labels if lab != 'default'}
                     nums += list(self.labels[d].values())
@@ -141,12 +90,19 @@ class Model:
                 self.isf[v] = self.isf.get(v, False) or self.declared(v, FLOAT_T, text) or (
                     flt and not self.declared(v, INT_T, text))   # 형을 모르면 식의 소수점 숫자로 판단
                 self.uns[v] = self.uns.get(v, False) or self.declared(v, UNSIGNED_T, text)
+                # Keep generated inputs representable without guessing wider target widths.
+                if self.declared(v, r'(?:unsigned[ \t]+char|uint8_t|uint8|u8|U8|UINT8)', text):
+                    self.upper[v] = 255
+                elif self.declared(v, r'(?:_Bool|bool)', text):
+                    self.upper[v] = 1
                 self.cands.setdefault(v, set()).update(nums)
         for v, ns in self.cands.items():   # 숫자마다 경계 양쪽
             s = self.step(v)
             vals = {0, 1} | {round(n + k * s, 6) for n in ns for k in (-1, 0, 1)}
             if self.uns[v]:
                 vals = {x for x in vals if x >= 0}
+            if v in self.upper:
+                vals = {x for x in vals if x <= self.upper[v]}
             if not self.isf[v]:
                 vals = {int(x) for x in vals}
             self.cands[v] = sorted(vals, key=lambda x: (x < 0, abs(x)))   # 0 이상 작은 값부터
@@ -187,7 +143,7 @@ class Model:
             return True
         for v in self.vars[d]:
             for x in (V[v] + self.step(v), V[v] - self.step(v)):
-                if self.uns[v] and x < 0:
+                if (self.uns[v] and x < 0) or (v in self.upper and x > self.upper[v]):
                     continue
                 if self.outcome(d, Defaults({**V, v: round(x, 6)})) not in (o, None):
                     return True
@@ -264,7 +220,6 @@ class Model:
             full = {v: V.get(v, 0) for v in self.cols}
             res = self.run(full)
             got = {t for t in todo if res.get(t[0]) == t[1] and self.boundary(*t, Defaults(full))}
-            got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in todo}
             manual.update((t, '값은 찾았지만 실제 경로가 달라짐 (확인 필요)') for t in bnd - got)
             tcs.append((full, res, got))
             todo = [t for t in todo if t not in got and t not in bnd]
@@ -283,13 +238,11 @@ class Model:
                 if d not in res:
                     continue
                 if res[d] is None:
-                    hint = ' — 들어가면 [T/F], 안 들어가면 [F]' if d.kind in LOOPS else ''
+                    hint = ' — 반복 실행 결과는 직접 확인' if d.kind in LOOPS else ''
                     lines.append(f'# L{d.line} {d.kind}: 직접 확인 ({self.manual.get(d, "결과 모름")}){hint}')
                     continue
                 i += 1
                 line = bc.tc_line(i, d, res[d])
-                if res[d] == 'T' and d.kind in LOOPS:   # 반복문에 들어가면 끝날 때 F도 탄다
-                    line = line.replace('[T]', '[T/F]', 1)
                 lines.append(line)
             blocks.append('\n'.join(lines))
         return '\n\n'.join(blocks) + '\n'

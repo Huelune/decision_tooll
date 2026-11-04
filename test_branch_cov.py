@@ -53,7 +53,7 @@ D3 [T] default:
 '''
 
 
-def test():
+def test(include_gui=True):
     r = bc.analyze(C_SRC, TC, func='secret_func')
     kinds = [d.kind for d in r['decs']]
     assert kinds == ['if', 'if', 'elseif', 'switch', 'if', 'for', 'if'], kinds  # 주석·문자열 속 if 제외
@@ -105,7 +105,8 @@ def test():
 
     test_howto()
     test_bva()
-    test_gui()
+    if include_gui:
+        test_gui()
     print('OK')
     print(screen)
 
@@ -199,12 +200,14 @@ def test_bva():
     assert vals[(10, 'T')]['get_temp()'] == 30.1 and vals[(10, 'F')]['get_temp()'] == 30
     assert all(V['n'] >= 0 for V, _, _ in tcs)
 
-    # 입력으로 정해지는 반복문: 들어가는 TC는 [T/F]로 적고 F도 채운 것으로 본다
+    # 반복문 T에서 F를 추론하지 않는다. 초기 F를 별도 TC로 만든다.
     w_src = 'int w(int n) { while (n > 0) { n--; } return n; }'
     p = bc.parse(bc.strip_code(w_src))
     m = bva.Model(p, [w_src])
     tcs, manual = m.generate()
-    assert not manual and len(tcs) == 1 and '[T/F] while(n > 0)' in m.tc_text(tcs), m.tc_text(tcs)
+    text = m.tc_text(tcs)
+    assert not manual and len(tcs) == 2 and '[T/F]' not in text, text
+    assert '[T] while(n > 0)' in text and '[F] while(n > 0)' in text, text
     assert len(bc.analyze('', m.tc_text(tcs), parsed=p)['missing']) == 0
 
     # 명령줄: CSV 저장, 화면에 이름이 안 나온다

@@ -84,26 +84,35 @@ class App:
 
     def load_c(self, path, func=None):
         try:
-            self.src = bc._read(path)
-            self.headers = bc.headers_near(path)
-            funcs = bc.parse(bc.strip_code(self.src))[2]
+            src = bc._read(path)
+            headers = bc.headers_near(path)
+            parsed = bc.parse(bc.strip_code(src))
+            funcs = parsed[2]
+            selected = func if func in funcs else (funcs[0] if len(funcs) == 1 else ALL)
+            if selected != ALL and len(funcs) != 1:
+                parsed = bc.parse(bc.strip_code(src), selected)
         except OSError:
             messagebox.showerror('C 파일', '파일을 열 수 없음 — 경로를 확인하세요')
             return
         except Exception:
             self.parse_failed()
             return
+        self.src, self.headers, self.parsed = src, headers, parsed
         self.func['values'] = [ALL] + funcs
-        self.func.set(func if func in funcs else (funcs[0] if len(funcs) == 1 else ALL))
-        self.set_func()
+        self.func.set(selected)
+        self.active_func = selected
+        self.manual = {}
+        self.refresh()
 
     def set_func(self):
         f = self.func.get()
         try:
-            self.parsed = bc.parse(bc.strip_code(self.src), None if f == ALL else f)
+            parsed = bc.parse(bc.strip_code(self.src), None if f == ALL else f)
         except Exception:
+            self.func.set(self.active_func)
             self.parse_failed()
             return
+        self.parsed, self.active_func = parsed, f
         self.manual = {}
         self.refresh()
 
@@ -113,7 +122,7 @@ class App:
             return
         try:
             m = bva.Model(self.parsed, [self.src] + self.headers)
-            tcs, self.manual = m.generate()
+            tcs, manual = m.generate()
         except Exception:
             with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
                 f.write(traceback.format_exc())
@@ -121,13 +130,17 @@ class App:
             return
         path = csv_path or filedialog.asksaveasfilename(title='경계값 TC 입력값 저장', defaultextension='.csv',
                                                         filetypes=[('CSV', '*.csv')], initialfile='boundary_tc.csv')
-        if path:
-            try:
-                m.write_csv(path, tcs)
-            except OSError:
-                messagebox.showerror('CSV', '파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지 확인하세요')
+        if not path:
+            return
         body = self.tc_text().rstrip()
-        self.text.insert('end', ('\n\n' if body else '') + m.tc_text(tcs))
+        start = len(bc.read_tcs(body)) + 1
+        try:
+            m.write_csv(path, tcs, start=start)
+        except OSError:
+            messagebox.showerror('CSV', '파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지 확인하세요')
+            return
+        self.manual = manual
+        self.text.insert('end', ('\n\n' if body else '') + m.tc_text(tcs, start=start))
         self.text.see('end')
         self.refresh()
         if not csv_path:
@@ -149,6 +162,8 @@ class App:
         except OSError:
             messagebox.showerror('TC', '파일을 열 수 없음 — 경로를 확인하세요')
             return
+        if not self.confirm_tc_change():
+            return
         self.text.delete('1.0', 'end')
         self.text.insert('1.0', body)
         self.tc_path, self.saved = path, self.tc_text()
@@ -158,17 +173,25 @@ class App:
                                                             filetypes=[('텍스트', '*.txt')])
         if not path:
             return False
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(self.tc_text())
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self.tc_text())
+        except OSError:
+            messagebox.showerror('TC 저장', '파일을 쓸 수 없음 — 경로와 파일 권한을 확인하세요')
+            return False
         self.tc_path, self.saved = path, self.tc_text()
         return True
 
-    def close(self):
-        if self.tc_text().strip() and self.tc_text() != self.saved:
+    def confirm_tc_change(self):
+        if self.tc_text() != self.saved:
             ans = messagebox.askyesnocancel('TC 저장', '저장하지 않은 TC 표기가 있습니다. 저장할까요?')
             if ans is None or (ans and not self.save_tc()):
-                return
-        self.root.destroy()
+                return False
+        return True
+
+    def close(self):
+        if self.confirm_tc_change():
+            self.root.destroy()
 
     def tc_text(self):
         return self.text.get('1.0', 'end-1c')

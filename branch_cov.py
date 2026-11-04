@@ -22,11 +22,12 @@ REPORT = 'branch_cov_report.txt'
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
+LITERAL = r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''
 
 
 def norm(s):
     """공백을 없애고 전체를 감싼 괄호를 벗긴다."""
-    s = re.sub(r'\s+', '', s)
+    s = re.sub(LITERAL + r'|\s+', lambda m: m.group() if m.group()[0] in "\"'" else '', s)
     while s.startswith('(') and _match_end(s) == len(s) - 1:
         s = s[1:-1]
     return s
@@ -34,7 +35,8 @@ def norm(s):
 
 def _match_end(s):
     d = 0
-    for i, c in enumerate(s):
+    for m in re.finditer(LITERAL + r'|[\s\S]', s):
+        i, c = m.start(), m.group()
         d += c == '('
         d -= c == ')'
         if d == 0:
@@ -43,9 +45,10 @@ def _match_end(s):
 
 
 def strip_code(src):
-    """주석·문자열·문자·전처리 줄을 공백으로 바꾼다(줄 번호 유지)."""
-    pat = r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|^[ \t]*#(?:\\\n|[^\n])*'
-    return re.sub(pat, lambda m: re.sub(r'[^\n]', ' ', m.group()), src, flags=re.S | re.M)
+    """주석·전처리 줄 제거. 리터럴은 원문과 토큰 경계를 보존한다."""
+    pat = LITERAL + r'|//[^\n]*|/\*.*?\*/|^[ \t]*#(?:\\\n|[^\n])*'
+    return re.sub(pat, lambda m: m.group() if m.group()[0] in "\"'" else
+                  re.sub(r'[^\n]', ' ', m.group()), src, flags=re.S | re.M)
 
 
 class Dec:
@@ -57,6 +60,7 @@ class Dec:
         self.labels = []          # switch: [(결과 이름, 줄)]
         self.guards = ()          # 앞쪽 조기 반환을 피한 결과들 [(Dec, 결과)]
         self.func = None
+        self.uncertain = ''        # 단일 경로로 표현할 수 없는 제어 흐름
 
     def reqs(self):
         """이 결정문이 평가되려면 필요한 결과들."""
@@ -71,7 +75,7 @@ class Dec:
 
 def parse(clean, func=None):
     """결정문 목록과 TC 매칭용 색인 {(종류, 조건): [(위치, Dec, 결과)]}을 만든다."""
-    toks = [(m.group(), m.start()) for m in re.finditer(r'\w+|\S', clean)]
+    toks = [(m.group(), m.start()) for m in re.finditer(LITERAL + r'|\w+|\S', clean)]
     nls = [m.start() for m in re.finditer('\n', clean)]
     decs, keys, funcs = [], {}, []
     guards = []   # 지금 위치에서 유효한 조기 반환 회피 조건 (블록을 나가면 줄어든다)
@@ -183,6 +187,7 @@ def parse(clean, func=None):
             if T(k) != '{':
                 return stmt(k, parent, loop)
             k, last, group, cur, fresh, n = k + 1, 'start', [], parent, True, len(guards)
+            ambiguous = False
             while T(k) != '}':
                 if T(k) in ('case', 'default'):
                     del guards[n:]
@@ -205,8 +210,13 @@ def parse(clean, func=None):
                     continue
                 if group:
                     cur = (d, group[0]) if len(group) == 1 and fresh else parent
+                    ambiguous = len(group) != 1 or not fresh
                     group = []
+                first = len(decs)
                 k, last = stmt(k, cur, loop)
+                if ambiguous:
+                    for child in decs[first:]:
+                        child.uncertain = '공유 case 또는 fall-through 경로 확인 필요'
             del guards[n:]
             return k + 1, None
         if t == 'while':
@@ -354,7 +364,7 @@ def template(d, o):
     """못 채운 분기 (d, o)를 TC 표기 줄의 분기 부분으로 만든다. 결과 [T]/[F]는 따로 붙인다."""
     if d.kind == 'switch':
         return o + ':'
-    c = ' '.join(d.cond.split())
+    c = re.sub(LITERAL + r'|\s+', lambda m: m.group() if m.group()[0] in "\"'" else ' ', d.cond).strip()
     if d.kind == 'for':
         return f'for(;{c};)'
     return f"{'while' if d.kind == 'dowhile' else d.kind}({c})"
@@ -384,10 +394,10 @@ def analyze(c_src, tc_text, func=None, parsed=None):
             if not cands:
                 warns.append((n, dno, '코드에서 못 찾음 (조건문 글자 확인)', text))
                 continue
-            after = [c for c in cands if c[0] > prev]
-            if not after and len(cands) > 1:
-                warns.append((n, dno, '같은 분기가 여러 곳, 순서로 못 가림 (첫 번째로 셈)', text))
-            pos, d, o = after[0] if after else cands[0]
+            if len(cands) > 1:
+                warns.append((n, dno, '같은 조건이 여러 곳: 함수/조건을 구분하기 전까지 집계하지 않음', text))
+                continue
+            pos, d, o = cands[0]
             prev, matched = pos, matched + 1
             # tf: 'T' / 'F' / 'TF'(반복문처럼 둘 다 탐). case·else 는 T일 때만 그 결과, [F]는 평가만 됨
             for outcome in (dict.fromkeys(tf) if o is None else [o] if 'T' in tf else []):
