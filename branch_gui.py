@@ -6,6 +6,8 @@
 [새 TC로 추가]는 그 경로를 새 TC 블록으로 붙인다. 다른 함수 호출은 stub으로 본다.
 [경계값 TC 만들기]는 경계 바로 양쪽 값으로 되도록 적은 TC를 만들어 입력값은 CSV로 저장하고
 TC 표기는 왼쪽 끝에 붙인다. 같은 폴더의 .h에서 #define·enum 값과 형을 찾는다.
+왼쪽 [stub 코드] 탭에 stub을 직접 쓰면 그 반환식을 쓴다(정의 안 한 stub은 0 반환이 기본).
+[뼈대 추가]는 분기에 값이 들어가는 stub을 `return 0;` 모양으로 붙여 준다.
 이 창에는 조건문 원문이 보이므로 캡처해서 밖으로 보내지 않는다.
 """
 import argparse
@@ -46,8 +48,22 @@ class App:
 
         pw = ttk.PanedWindow(root, orient='horizontal')
         pw.pack(fill='both', expand=True)
-        self.text = tk.Text(pw, width=50, undo=True, font=('Consolas', 11))
-        pw.add(self.text, weight=1)
+        tabs = ttk.Notebook(pw)
+        pw.add(tabs, weight=1)
+        self.text = tk.Text(tabs, width=50, undo=True, font=('Consolas', 11))
+        tabs.add(self.text, text='TC 표기')
+        sbox = ttk.Frame(tabs)
+        tabs.add(sbox, text='stub 코드')
+        sbar = ttk.Frame(sbox)
+        sbar.pack(fill='x')
+        ttk.Button(sbar, text='열기', command=self.open_stub).pack(side='left')
+        ttk.Button(sbar, text='저장', command=self.save_stub).pack(side='left')
+        ttk.Button(sbar, text='뼈대 추가', command=self.add_skeleton).pack(side='left', padx=(8, 0))
+        self.stub_zero = tk.BooleanVar(value=True)
+        ttk.Checkbutton(sbar, text='정의 안 한 stub은 0 반환', variable=self.stub_zero).pack(side='left', padx=8)
+        self.stub = tk.Text(sbox, undo=True, font=('Consolas', 11))
+        self.stub.pack(fill='both', expand=True)
+        self.stub_path, self.stub_saved = None, ''
         right = ttk.PanedWindow(pw, orient='vertical')
         pw.add(right, weight=1)
         self.tree = ttk.Treeview(right, columns=('tc',), show='tree headings')
@@ -112,7 +128,7 @@ class App:
         if not self.parsed:
             return
         try:
-            m = bva.Model(self.parsed, [self.src] + self.headers)
+            m = bva.Model(self.parsed, [self.src] + self.headers, self.stub_text(), self.stub_zero.get())
             tcs, self.manual = m.generate()
         except Exception:
             with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
@@ -168,7 +184,53 @@ class App:
             ans = messagebox.askyesnocancel('TC 저장', '저장하지 않은 TC 표기가 있습니다. 저장할까요?')
             if ans is None or (ans and not self.save_tc()):
                 return
+        if self.stub_text().strip() and self.stub_text() != self.stub_saved:
+            ans = messagebox.askyesnocancel('stub 저장', '저장하지 않은 stub 코드가 있습니다. 저장할까요?')
+            if ans is None or (ans and not self.save_stub()):
+                return
         self.root.destroy()
+
+    # --- stub 코드 ---
+    def stub_text(self):
+        return self.stub.get('1.0', 'end-1c')
+
+    def stubs(self):
+        return bva.Stubs(self.stub_text(), bva.constants([self.src] + self.headers + [self.stub_text()]),
+                         self.stub_zero.get())
+
+    def open_stub(self):
+        path = filedialog.askopenfilename(filetypes=[('C', '*.c *.h'), ('모든 파일', '*.*')])
+        if not path:
+            return
+        try:
+            body = bc._read(path)
+        except OSError:
+            messagebox.showerror('stub', '파일을 열 수 없음 — 경로를 확인하세요')
+            return
+        self.stub.delete('1.0', 'end')
+        self.stub.insert('1.0', body)
+        self.stub_path, self.stub_saved = path, self.stub_text()
+
+    def save_stub(self):
+        path = self.stub_path or filedialog.asksaveasfilename(defaultextension='.c', filetypes=[('C', '*.c')])
+        if not path:
+            return False
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(self.stub_text())
+        self.stub_path, self.stub_saved = path, self.stub_text()
+        return True
+
+    def add_skeleton(self):
+        """분기에 값이 들어가는 stub 중 아직 없는 것을 `return 0;` 뼈대로 붙인다."""
+        if not self.parsed:
+            return
+        lines = bva.skeleton(bva.needed_stubs(self.parsed), [self.src] + self.headers, self.stub_text())
+        if not lines:
+            messagebox.showinfo('stub', '더 추가할 stub이 없습니다.')
+            return
+        body = self.stub_text().rstrip()
+        self.stub.insert('end', ('\n' if body else '') + '\n'.join(lines) + '\n')
+        self.stub.see('end')
 
     def tc_text(self):
         return self.text.get('1.0', 'end-1c')
@@ -227,7 +289,7 @@ class App:
         self.how.configure(state='normal')
         self.how.delete('1.0', 'end')
         if d is not None:
-            self.how.insert('1.0', '\n'.join(bc.howto(d, o, self.result['info'])))
+            self.how.insert('1.0', '\n'.join(bc.howto(d, o, self.result['info'], self.stubs())))
         self.how.configure(state='disabled')
 
     def add_tc(self):

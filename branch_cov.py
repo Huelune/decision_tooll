@@ -1,6 +1,7 @@
 """실행 전 분기 커버리지 추정기 (C, decision coverage).
 
 사용: python branch_cov.py <C 파일> [TC 표기 파일] [--func 함수이름] [--csv 경계값TC.csv]
+                          [--stub stub코드.c] [--stub-free]
 
 TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형식
 (if / else if / elseif / else / case / default / while / for).
@@ -429,7 +430,7 @@ def need(d, o):
     return sorted(seen.items(), key=lambda t: t[0].pos)
 
 
-def values(path, info):
+def values(path, info, stubs=None):
     """경로의 조건에 쓰인 이름마다 값이 어디서 오는지. 다른 함수는 stub으로 본다."""
     out = {}
     for d, _ in path:
@@ -441,7 +442,13 @@ def values(path, info):
             if (t in out or base in C_WORDS or base.isupper() or base.endswith('_t')
                     or c[max(m.start() - 1, 0):m.start()] == '.' or c[max(m.start() - 2, 0):m.start()] == '->'):
                 continue
-            out[t] = 'stub 반환값' if c[m.end():m.end() + 1] == '(' else source_of(t, d, info)[0]
+            if c[m.end():m.end() + 1] == '(':
+                out[t] = stubs.desc(t) if stubs else 'stub 반환값'
+                continue
+            why, col = source_of(t, d, info)
+            if stubs and col and col.endswith('()'):
+                why = f'{col} 받음 — {stubs.desc(col[:-2])}'
+            out[t] = why
     return out
 
 
@@ -467,13 +474,13 @@ def tc_line(i, d, o):
     return f"D{i} [{'T' if d.kind == 'switch' else o}] {template(d, o)}"
 
 
-def howto(d, o, info):
+def howto(d, o, info, stubs=None):
     """(d, o)를 채우는 TC를 쓰는 데 필요한 것: 거쳐야 할 분기와 조건에 쓰인 값의 출처."""
     path = need(d, o)
     out = [f"L{d.line_of(o)} {_kind(d, o)} {'' if d.kind == 'switch' else o} 채우기",
            '  꼭 거쳐야 하는 분기 (여기 없는 분기는 어떤 결과든 됨, D 번호는 실제 순서로 고칠 것)']
     out += ['    ' + tc_line(i, pd, po) for i, (pd, po) in enumerate(path, 1)]
-    vals = values(path, info)
+    vals = values(path, info, stubs)
     if vals:
         w = max(map(len, vals))
         out.append('  조건에 쓰인 값')
@@ -538,6 +545,8 @@ def main(argv=None):
     ap.add_argument('tc_file', nargs='?', help='없으면 TC 없이 분기만 센다')
     ap.add_argument('--func', help='이 함수만 본다')
     ap.add_argument('--csv', help='경계값 TC 입력값을 이 CSV로 저장 (TC 표기는 상세 파일에)')
+    ap.add_argument('--stub', help='직접 쓴 stub 코드 파일 (반환식을 계산에 씀)')
+    ap.add_argument('--stub-free', action='store_true', help='정의 안 한 stub 반환값을 0 대신 자유 입력으로')
     a = ap.parse_args(argv)
     os.system('cls' if os.name == 'nt' else 'clear')  # 고정 문자열이라 주입 위험 없음
     rpt = os.path.join(tempfile.gettempdir(), REPORT)
@@ -552,9 +561,15 @@ def main(argv=None):
         print('오류: TC 표기 파일을 열 수 없음 — 경로를 확인하세요')
         return 1
     try:
+        stub_src = _read(a.stub) if a.stub else ''
+    except OSError:
+        print('오류: stub 파일을 열 수 없음 — 경로를 확인하세요')
+        return 1
+    try:
         parsed = parse(strip_code(src), a.func)
         r = analyze('', tc_text, parsed=parsed)
-        extra = make_bva(parsed, [src] + headers_near(a.c_file), a.csv) if a.csv else None
+        extra = (make_bva(parsed, [src] + headers_near(a.c_file), a.csv, stub_src, not a.stub_free)
+                 if a.csv else None)
     except LookupError:
         print('오류: --func 로 준 함수를 C 파일에서 못 찾음 — 함수 이름을 확인하세요')
         return 1
@@ -586,10 +601,10 @@ def headers_near(c_path):
     return out
 
 
-def make_bva(parsed, srcs, csv_path):
+def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True):
     """경계값 TC를 만들어 CSV로 쓴다 → (TC 수, 수동 분기 수, 상세 보고서에 붙일 글)."""
     import bva
-    m = bva.Model(parsed, srcs)
+    m = bva.Model(parsed, srcs, stub_src, stub_zero)
     tcs, manual = m.generate()
     m.write_csv(csv_path, tcs)
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']

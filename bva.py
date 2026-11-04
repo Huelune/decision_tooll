@@ -41,7 +41,8 @@ def num(s):
 
 
 def translate(cond, consts, var_of=None):
-    """C 식 → (Python 식, 변수 열 이름들, 식에 나온 숫자들). var_of(이름, 함수호출?) → 열 이름 또는 Manual."""
+    """C 식 → (Python 식, 변수 열 이름들, 식에 나온 숫자들).
+    var_of(이름, 함수호출?) → 그 자리에 넣을 (Python 식, 열 이름들, 숫자들) 또는 Manual."""
     c = re.sub(r'\(\s*(?:(?:unsigned|signed|const|volatile|struct|enum)\s+)*[A-Za-z_]\w*\s*\**\s*\)(?=\s*[\w(!~])',
                ' ', cond)   # 형 변환 (uint8)x 제거
     toks = TOK.findall(c)
@@ -72,10 +73,10 @@ def translate(cond, consts, var_of=None):
                 raise Manual(f'상수 값 모름 ({t})')
             if var_of is None:
                 raise Manual(f'상수 값 모름 ({t})')
-            k = var_of(t, call)
-            if k not in vs:
-                vs.append(k)
-            out.append(f'V[{k!r}]')
+            src, ks, ns = var_of(t, call)
+            out.append(f'({src})')
+            nums += ns
+            vs += [k for k in ks if k not in vs]
         elif t in OPS:
             out.append(OPS[t])
         else:
@@ -112,12 +113,109 @@ def constants(srcs):
     return out
 
 
+def _var(k):
+    return f'V[{k!r}]', [k], []
+
+
+def _close(s, i):
+    """s[i] == '{' 의 짝 '}' 위치."""
+    d = 0
+    for j in range(i, len(s)):
+        d += (s[j] == '{') - (s[j] == '}')
+        if d == 0:
+            return j
+    return len(s)
+
+
+class Stubs:
+    """사용자가 써 넣은 stub 코드. 함수마다 반환식을 읽어 조건식 자리에 넣는다.
+    정의 안 한 stub은 zero=True면 0을 돌려주고, False면 반환값을 자유 입력으로 본다."""
+
+    def __init__(self, src='', consts=None, zero=True):
+        self.zero, self.fns, self.note, self.rtype = zero, {}, {}, {}
+        clean = bc.strip_code(src)
+        for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\(([^()]*)\)\s*\{', clean):
+            name = m.group(1)
+            if name in ('if', 'while', 'for', 'switch'):
+                continue
+            self.rtype[name] = re.split(r'[;}]', clean[:m.start()])[-1].strip()
+            body = clean[m.end():_close(clean, m.end() - 1)]
+            params = {re.findall(r'\w+', p)[-1] for p in m.group(2).split(',')
+                      if re.findall(r'\w+', p) and p.strip() != 'void'}
+            rets = re.findall(r'\breturn\b\s*([^;]*);', body)
+            if len(rets) != 1 or not rets[0].strip():
+                self.note[name] = '반환문이 하나가 아님'
+                continue
+            try:
+                self.fns[name] = translate(rets[0], consts or {}, lambda t, call, ps=params: self._glob(t, call, ps))
+            except Manual as e:
+                self.note[name] = str(e)
+
+    @staticmethod
+    def _glob(t, call, ps):
+        if call or re.match(r'\w+', t).group() in ps:
+            raise Manual('인자나 다른 함수에 따라 달라짐')
+        return _var(t)
+
+    def ref(self, name):
+        if name in self.fns:
+            return self.fns[name]
+        if self.zero and name not in self.note:
+            return '0', [], [0]
+        return _var(name + '()')
+
+    def desc(self, name):
+        if name in self.fns:
+            src, vs, _ = self.fns[name]
+            return f"stub 코드: {', '.join(vs)} 값" if vs else f'stub 코드: {eval(src, {})} 고정'
+        if name in self.note:
+            return f'stub 반환값 자유 입력 (stub 코드: {self.note[name]})'
+        return 'stub 정의 없음 → 0 고정' if self.zero else 'stub 반환값 자유 입력'
+
+
+def needed_stubs(parsed):
+    """분기 조건에 값이 들어가는 stub 이름들 (직접 호출, 또는 v = f(); 로 받은 v를 조건에 씀)."""
+    out = []
+    for d in sorted(parsed[0], key=lambda d: d.pos):
+        c = re.sub(r'\s+', '', d.cond)
+        for m in re.finditer(r'[A-Za-z_]\w*(?:(?:\.|->)[A-Za-z_]\w*)*', c):
+            t = m.group()
+            if c[max(m.start() - 1, 0):m.start()] == '.' or c[max(m.start() - 2, 0):m.start()] == '->':
+                continue
+            if c[m.end():m.end() + 1] == '(':
+                name = t
+            else:
+                col = bc.source_of(t, d, parsed[3])[1]
+                name = col[:-2] if col and col.endswith('()') else None
+            if name and name != 'sizeof' and not name.isupper() and name not in out:
+                out.append(name)
+    return out
+
+
+def skeleton(names, srcs, stub_src=''):
+    """아직 stub 코드가 없는 이름마다 `반환형 이름(인자) { return 0; }`. 원형이 있으면 그 형을 따른다."""
+    have = Stubs(stub_src)
+    text = '\n'.join(bc.strip_code(s) for s in srcs)
+    lines = []
+    for n in names:
+        if n in have.fns or n in have.note:
+            continue
+        m = re.search(rf'(?:^|[;}}\n])\s*((?:[A-Za-z_]\w*[ \t\*]+)+?)\**{re.escape(n)}\s*\(([^;{{)]*)\)\s*;', text)
+        rtype = re.sub(r'\b(?:extern|static|inline)\b', '', m.group(1)).strip() if m else 'int'
+        if rtype == 'void':
+            continue
+        lines.append(f"{rtype} {n}({(m.group(2).strip() if m else '') or 'void'}) {{ return 0; }}")
+    return lines
+
+
 class Model:
-    def __init__(self, parsed, srcs):
+    def __init__(self, parsed, srcs, stub_src='', stub_zero=True):
         self.decs = sorted(parsed[0], key=lambda d: d.pos)
         self.info = parsed[3]
-        self.consts = constants(srcs)
-        text = '\n'.join(bc.strip_code(s) for s in srcs)
+        self.consts = constants(srcs + [stub_src])
+        self.stubs = Stubs(stub_src, self.consts, stub_zero)
+        self.fixed, self.float_hint = {}, set()   # 결정문 -> 고정값 stub 이름들 / float stub 반환 변수
+        text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         for d in self.decs:
@@ -139,7 +237,7 @@ class Model:
                 if v not in self.cols:
                     self.cols.append(v)
                 self.isf[v] = self.isf.get(v, False) or self.declared(v, FLOAT_T, text) or (
-                    flt and not self.declared(v, INT_T, text))   # 형을 모르면 식의 소수점 숫자로 판단
+                    (flt or v in self.float_hint) and not self.declared(v, INT_T, text))   # 형을 모르면 소수점 숫자·stub 형으로
                 self.uns[v] = self.uns.get(v, False) or self.declared(v, UNSIGNED_T, text)
                 self.cands.setdefault(v, set()).update(nums)
         for v, ns in self.cands.items():   # 숫자마다 경계 양쪽
@@ -152,12 +250,25 @@ class Model:
             self.cands[v] = sorted(vals, key=lambda x: (x < 0, abs(x)))   # 0 이상 작은 값부터
 
     def var_of(self, t, call, d):
-        if call:
-            return t + '()'
-        why, col = bc.source_of(t, d, self.info)
-        if col is None:
-            raise Manual(f'{t}: {why}')
-        return col
+        if not call:
+            why, col = bc.source_of(t, d, self.info)
+            if col is None:
+                raise Manual(f'{t}: {why}')
+            if not col.endswith('()'):
+                return _var(col)
+            t = col[:-2]   # v = f(); 로 받은 값
+        r = self.stubs.ref(t)
+        if not r[1]:
+            self.fixed.setdefault(d, set()).add(t)
+        if re.search(rf'\b{FLOAT_T}', self.stubs.rtype.get(t, '')):
+            self.float_hint.update(r[1])   # float stub이 돌려주는 변수는 형을 모르면 float로
+        return r
+
+    def why_not(self, t):
+        names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
+        return '경로 조건을 모두 만족하는 경계값을 못 찾음' + (
+            f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
+            if names else '')
 
     @staticmethod
     def declared(v, pat, text):
@@ -183,7 +294,7 @@ class Model:
 
     def boundary(self, d, o, V):
         """한 변수를 경계 한 칸 움직이면 결과가 바뀌는가 (= 경계 바로 옆 값인가)."""
-        if d.kind == 'switch':
+        if d.kind == 'switch' or not self.vars[d]:   # 움직일 값이 없으면(고정 stub 등) 그대로 인정
             return True
         for v in self.vars[d]:
             for x in (V[v] + self.step(v), V[v] - self.step(v)):
@@ -259,7 +370,7 @@ class Model:
                 if V2 is not None:
                     req, bnd, V = r2, bnd | {t}, V2
             if V is None:
-                manual.update((t, '경로 조건을 모두 만족하는 경계값을 못 찾음') for t in todo)
+                manual.update((t, self.why_not(t)) for t in todo)
                 break
             full = {v: V.get(v, 0) for v in self.cols}
             res = self.run(full)

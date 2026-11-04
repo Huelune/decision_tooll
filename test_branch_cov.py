@@ -188,7 +188,7 @@ def test_bva():
 
     # float은 0.1, unsigned는 음수 없음, #define·enum 값, stub 반환값을 받은 지역 변수
     p = bc.parse(bc.strip_code(H_SRC))
-    m = bva.Model(p, [H_SRC])
+    m = bva.Model(p, [H_SRC], stub_zero=False)   # stub 반환값을 자유 입력으로
     assert {v: (m.isf[v], m.uns[v]) for v in m.cols} == {
         't': (True, False), 'n': (False, True), 's': (False, False),
         'Stub_Read()': (False, False), 'get_temp()': (True, False)}
@@ -198,6 +198,30 @@ def test_bva():
     assert vals[(8, 'T')]['t'] == 25.5 and vals[(8, 'F')]['t'] == 25.4, vals
     assert vals[(10, 'T')]['get_temp()'] == 30.1 and vals[(10, 'F')]['get_temp()'] == 30
     assert all(V['n'] >= 0 for V, _, _ in tcs)
+
+    # stub: 정의 안 하면 0 고정 → 못 가는 분기는 그 stub 이름을 알려 준다
+    m = bva.Model(p, [H_SRC])
+    tcs, manual = m.generate()
+    assert m.cols == ['t', 'n', 's'] and len(tcs) == 3, m.cols
+    assert [(d.line, o) for d, o in manual] == [(10, 'T')] and 'get_temp()' in list(manual.values())[0], manual
+    # 뼈대: 원형이 있으면 그 반환형, 없으면 int
+    names = bva.needed_stubs(p)
+    assert names == ['Stub_Read', 'get_temp'], names
+    assert bva.skeleton(names, [H_SRC]) == ['int Stub_Read(void) { return 0; }',
+                                           'float get_temp(void) { return 0; }']
+    assert bva.skeleton(names, [H_SRC], 'int Stub_Read(void) { return 0; }') == ['float get_temp(void) { return 0; }']
+    # stub 코드: 전역을 돌려주면 그 전역이 CSV 열, float stub이면 0.1 단위
+    stub = 'int Stub_Read(void) { return g_ret; }\nfloat get_temp(void) { return g_temp; }'
+    m = bva.Model(p, [H_SRC], stub)
+    tcs, manual = m.generate()
+    assert not manual and m.cols == ['t', 'n', 's', 'g_ret', 'g_temp'] and m.isf['g_temp'], m.cols
+    vals = {(d.line, o): V for V, _, g in tcs for d, o in g}
+    assert vals[(10, 'T')]['g_temp'] == 30.1 and vals[(10, 'F')]['g_temp'] == 30, vals
+    s = bva.Stubs('int a(int x){return x;} int b(void){return 3;} int c(void){ if(g) return 1; return 0; }')
+    assert s.ref('b') == ('3', [], [3]) and s.ref('a')[1] == ['a()'] and s.ref('c')[1] == ['c()']
+    assert s.ref('zz') == ('0', [], [0]) and bva.Stubs('', zero=False).ref('zz')[1] == ['zz()']
+    assert s.desc('b') == 'stub 코드: 3 고정' and '자유 입력' in s.desc('a') and '0 고정' in s.desc('zz')
+    assert bc.values(bc.need(p[0][2], 'T'), p[3], s)['get_temp'] == 'stub 정의 없음 → 0 고정'
 
     # 입력으로 정해지는 반복문: 들어가는 TC는 [T/F]로 적고 F도 채운 것으로 본다
     w_src = 'int w(int n) { while (n > 0) { n--; } return n; }'
@@ -255,6 +279,11 @@ def test_gui():
     assert os.path.exists(path) and len(app.result['tcs']) == 6, len(app.result['tcs'])
     assert '13/15' in app.status['text'], app.status['text']
     assert any('경계값 수동' in x for x in app.warn.get(0, 'end'))
+    # stub 탭: 예시는 stub이 없어 뼈대가 안 붙고, 직접 쓴 stub 코드는 채우는 법에 나온다
+    import bva
+    assert bva.needed_stubs(app.parsed) == []   # 예시 함수에는 분기에 값이 들어가는 stub이 없다
+    app.stub.insert('1.0', 'int x_stub(void) { return 7; }')
+    assert app.stubs().desc('x_stub') == 'stub 코드: 7 고정'
     root.destroy()
 
 
