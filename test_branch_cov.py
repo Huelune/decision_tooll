@@ -391,6 +391,11 @@ def test_follow():
     pk = bc.parse(bc.strip_code(e_src))
     mk = bva.Model(pk, [e_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])
     assert 'eSecretRun' not in mk.cols and '상수 값 모름' in mk.manual[pk[0][0]], mk.manual
+    # 결과를 모르는 결정문도 D 번호를 차지한다: 뒤 결정문은 D2
+    q_src = 'int g_secLv;\nint q(int mode) { int r = 0; if (mode == eSecretRun) { r = 1; } if (g_secLv > 3) { r = 2; } return r; }\n'
+    mq = bva.Model(bc.parse(bc.strip_code(q_src)), [q_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])
+    tk = mq.tc_text(mq.generate()[0])
+    assert '# D1 [?] if(mode == eSecretRun)' in tk and '\nD2 [' in tk and '\nD1 [' not in tk, tk
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path]) == 0
