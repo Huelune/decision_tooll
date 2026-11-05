@@ -669,10 +669,14 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True):
     if csv_path:
         m.write_csv(csv_path, tcs)
     total = sum(len(d.outcomes()) for d in parsed[0])
-    got = len(set().union(set(), *(g for _, _, g in tcs)))
-    lines = [f"경계값 TC {len(tcs)}개로 {got}/{total} 채움 ({time.monotonic() - t0:.0f}초)" +
-             (' → CSV 저장' if csv_path else '  (CSV·TC 표기가 필요하면 --csv 파일이름.csv)'),
-             f'자동으로 못 만든 분기 {len(manual)}개' + ('  (이유 종류별, L=줄 번호)' if manual else '')]
+    got = set().union(set(), *(g for _, _, g in tcs))
+    plain = sorted({d.line_of(o) for d, o in got & m.plain})
+    lines = [f"경계값 TC {len(tcs)}개로 {len(got)}/{total} 채움 ({time.monotonic() - t0:.0f}초)" +
+             (' → CSV 저장' if csv_path else '  (CSV·TC 표기가 필요하면 --csv 파일이름.csv)')]
+    if plain:   # 갈 수는 있지만 경계 바로 옆 값이 없는 분기 (예: 바깥 조건이 더 좁음)
+        lines.append(f'  그중 경계가 아닌 값으로 채운 분기 {len(got & m.plain)}개  ' +
+                     ' '.join(f'L{x}' for x in plain[:8]) + (' …' if len(plain) > 8 else ''))
+    lines.append(f'자동으로 못 만든 분기 {len(manual)}개' + ('  (이유 종류별, L=줄 번호)' if manual else ''))
     kinds = {}
     for (d, o), why in manual.items():
         kinds.setdefault(bva.reason_kind(why), []).append(d.line_of(o))

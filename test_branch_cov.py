@@ -3,6 +3,7 @@ import contextlib
 import csv
 import os
 import sys
+import tempfile
 import io
 
 import branch_cov as bc
@@ -316,8 +317,19 @@ def test_follow():
     tcs, manual = bva.Model(p, [F_SRC]).generate()
     assert 'Stub_A()' in manual[(d[11], 'T')] and 'Stub_B()' in manual[(d[11], 'T')], manual
 
+    # 경계를 못 맞추면 일반 값으로 채우고, 갈 수 없는 경로는 그 이유로 남긴다
+    nb = 'int nb(int a) { if (a > 10) { if (a > 5) { return 1; } } return 0; }'
+    p2 = bc.parse(bc.strip_code(nb))
+    inner = p2[0][1]
+    m2 = bva.Model(p2, [nb])
+    tcs, manual = m2.generate()
+    assert (inner, 'T') in m2.plain and (inner, 'T') in set().union(*(g for _, _, g in tcs)), m2.plain
+    assert list(manual) == [(inner, 'F')] and bva.reason_kind(manual[(inner, 'F')]) == '갈 수 없는 경로/후보 밖'
+    path = os.path.join(tempfile.mkdtemp(), 'nb.csv')
+    m2.write_csv(path, tcs)
+    assert '(경계 아님)' in open(path, encoding='utf-8-sig').read()
+
     # TC 없이 명령줄: 결정문 종류와 경계값 요약을 이유 종류로만 찍는다 (이름이 화면에 안 나온다)
-    import tempfile
     src = (F_SRC.replace('sum', 'secret_sum').replace('Stub_', 'Secret_stub_')
            .replace('(v > 100)', '(v > SECRET_LIMIT)'))
     c_path = os.path.join(tempfile.mkdtemp(), 'secret_mod.c')

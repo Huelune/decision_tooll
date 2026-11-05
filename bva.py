@@ -55,7 +55,8 @@ class Manual(Exception):
 
 
 # 수동 이유 원문(이름이 들어 있음) → 화면에 찍을 종류. 앞에 있는 것부터 본다
-REASONS = [('고정 stub', '고정 stub이 막음'), ('경계값을 못 찾음', '경계값 못 찾음'),
+REASONS = [('고정 stub', '고정 stub이 막음'), ('갈 수 없는 경로', '갈 수 없는 경로/후보 밖'),
+           ('탐색 상한', '탐색 상한에 걸림'),
            ('실제 경로가 달라짐', '값과 경로가 안 맞음'), ('반복문 안에서 대입', '반복문 안에서 대입'),
            ('식 안에서 대입', '조건식 안에서 대입'), ('구조체 통째로', '구조체 통째로 대입'),
            ('결과에 따라 달라짐', '수동 분기 뒤의 대입'), ('상수 값 모름', '상수 값 모름'),
@@ -323,7 +324,8 @@ class Model:
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
-        self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
+        self.own, self.leaf, self.deadline = {}, set(), float('inf')
+        self.plain, self.stop = set(), None   # plain: 경계는 못 맞추고 일반 값으로 채우는 분기   # own: 경계 검사에서 움직일 변수
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
@@ -430,9 +432,13 @@ class Model:
         st = self.info['stmts']
         return st[i][2] if i >= 0 and k < st[i][1] else None
 
-    def why_not(self, t):
+    def why_not(self, t, stop=None):
+        if stop == 'time':
+            return f'계산 시간 한도({BUDGET}초)를 넘김'
+        if stop == 'limit':
+            return '값 조합이 많아 탐색 상한에 걸림'
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
-        return '경로 조건을 모두 만족하는 경계값을 못 찾음' + (
+        return '갈 수 없는 경로이거나 후보 밖 값이 필요함 (경로 조건을 모두 만족하는 값이 없음)' + (
             f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
             if names else '')
 
@@ -474,9 +480,10 @@ class Model:
                     return True
         return False
 
-    def solve(self, req, bnd):
-        """req {결정문: 결과}를 모두 만족하고 bnd 분기는 경계에 있는 값. 못 찾으면 None."""
-        V, nodes = Defaults(), [0]
+    def solve(self, req, bnd, limit=LIMIT):
+        """req {결정문: 결과}를 모두 만족하고 bnd 분기는 경계에 있는 값. 못 찾으면 None.
+        못 찾은 까닭은 self.stop: 'limit'(탐색 상한) / 'time'(시간 한도) / None(후보를 다 봄)."""
+        V, nodes, self.stop = Defaults(), [0], None
         if any(not self.vars[d] and self.outcome(d, V) != o for d, o in req.items()):
             return None
         order = [v for d in sorted(req, key=lambda d: d.pos) for v in self.vars[d]]
@@ -497,7 +504,11 @@ class Model:
             v = order[i]
             for x in self.cands[v]:
                 nodes[0] += 1
-                if nodes[0] > LIMIT or (nodes[0] % 64 == 0 and time.monotonic() > self.deadline):
+                if nodes[0] > limit:
+                    self.stop = 'limit'
+                    break
+                if nodes[0] % 64 == 0 and time.monotonic() > self.deadline:
+                    self.stop = 'time'
                     break
                 V[v] = x
                 if ok(v) and go(i + 1):
@@ -525,8 +536,19 @@ class Model:
             if bad:
                 manual[t] = f'L{bad.line} {self.manual[bad]}'
         todo = [t for t in targets if t not in manual]
+        self.deadline, runs, self.plain = time.monotonic() + BUDGET, [], set()
+        for t in todo:   # 하나씩 먼저 풀어 본다: 혼자서도 못 가는 분기는 묶을 때마다 다시 찾지 않게 뺀다
+            req = dict(bc.need(*t))
+            if self.solve(req, {t}) is not None:
+                continue
+            stop = self.stop
+            if stop != 'time' and self.solve(req, set()) is not None:
+                self.plain.add(t)   # 갈 수는 있는데 경계 바로 옆 값은 못 찾음 → 일반 값으로 채운다
+                continue
+            if stop == 'time' or self.stop != 'limit':   # 상한에 걸린 건 묶을 때 다른 값 순서로 다시 해 본다
+                manual[t] = self.why_not(t, 'time' if stop == 'time' else self.stop)
+        todo = [t for t in todo if t not in manual]
         deep = sorted(todo, key=lambda t: -len(bc.need(*t)))
-        self.deadline, runs = time.monotonic() + BUDGET, []
         for order in (todo, deep):   # 두 번째 순서는 남은 시간만 쓴다 (못 끝내면 수동이 많아 안 뽑힌다)
             runs.append(self.greedy(order, dict(manual)))
         self.deadline = float('inf')
@@ -536,26 +558,31 @@ class Model:
         tcs = []
         while todo:
             req, bnd, V = {}, set(), None
+            picked = set()
             for t in todo:   # 앞 분기와 같이 갈 수 있으면 같은 TC에 묶는다
                 r2 = dict(req)
                 if any(r2.setdefault(pd, po) != po for pd, po in bc.need(*t)):
                     continue
-                V2 = self.solve(r2, bnd | {t})
+                b2 = bnd if t in self.plain else bnd | {t}
+                # 혼자서는 풀리는 분기라 묶음 실패는 대개 값 충돌 → 짧게 찾고 다음 TC로 넘긴다
+                V2 = self.solve(r2, b2, LIMIT if V is None else LIMIT // 3)
                 if V2 is not None:
-                    req, bnd, V = r2, bnd | {t}, V2
+                    req, bnd, V = r2, b2, V2
+                    picked.add(t)
             if time.monotonic() > self.deadline:
                 manual.update((t, f'계산 시간 한도({BUDGET}초)를 넘김') for t in todo)
                 break
             if V is None:
-                manual.update((t, self.why_not(t)) for t in todo)
+                manual.update((t, self.why_not(t, self.stop)) for t in todo)
                 break
             full = {v: V.get(v, 0) for v in self.cols}
             res = self.run(full)
-            got = {t for t in todo if res.get(t[0]) == t[1] and self.boundary(*t, Defaults(full))}
+            got = {t for t in todo if res.get(t[0]) == t[1] and
+                   (t in self.plain or self.boundary(*t, Defaults(full)))}
             got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in todo}
-            manual.update((t, '값은 찾았지만 실제 경로가 달라짐 (확인 필요)') for t in bnd - got)
+            manual.update((t, '값은 찾았지만 실제 경로가 달라짐 (확인 필요)') for t in picked - got)
             tcs.append((full, res, got))
-            todo = [t for t in todo if t not in got and t not in bnd]
+            todo = [t for t in todo if t not in got and t not in picked]
         return tcs, manual
 
     @staticmethod
@@ -587,6 +614,6 @@ class Model:
             w = csv.writer(f)
             w.writerow(['TC'] + self.cols + ['경계로 채운 분기'])
             for n, (V, _, got) in enumerate(tcs, start):
-                hit = sorted((d.line_of(o), o) for d, o in got)
+                hit = sorted((d.line_of(o), o, (d, o) in self.plain) for d, o in got)
                 w.writerow([f'TC{n}'] + [self.fmt(V[c]) for c in self.cols] +
-                           ['; '.join(f'L{ln} {o}' for ln, o in hit)])
+                           ['; '.join(f"L{ln} {o}{'(경계 아님)' if p else ''}" for ln, o, p in hit)])
