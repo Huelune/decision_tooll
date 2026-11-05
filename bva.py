@@ -435,12 +435,12 @@ class Model:
     def why_not(self, t, stop=None):
         if stop == 'time':
             return f'계산 시간 한도({BUDGET}초)를 넘김'
-        if stop == 'limit':
-            return '값 조합이 많아 탐색 상한에 걸림'
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
-        return '갈 수 없는 경로이거나 후보 밖 값이 필요함 (경로 조건을 모두 만족하는 값이 없음)' + (
-            f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
-            if names else '')
+        hint = (f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
+                if names else '')
+        if stop == 'limit':
+            return '값 조합이 많아 탐색 상한에 걸림' + hint
+        return '갈 수 없는 경로이거나 후보 밖 값이 필요함 (경로 조건을 모두 만족하는 값이 없음)' + hint
 
     @staticmethod
     def declared(v, pat, text):
@@ -551,8 +551,35 @@ class Model:
         deep = sorted(todo, key=lambda t: -len(bc.need(*t)))
         for order in (todo, deep):   # 두 번째 순서는 남은 시간만 쓴다 (못 끝내면 수동이 많아 안 뽑힌다)
             runs.append(self.greedy(order, dict(manual)))
+        tcs, manual = min(runs, key=lambda r: (len(r[1]), len(r[0])))   # 수동이 적은 쪽, 그다음 TC가 적은 쪽
+        for t in sorted(manual, key=lambda t: t[0].pos):   # 상한에 걸린 분기는 남은 시간에 상한을 크게 해서 하나씩
+            if t in manual and '탐색 상한' in manual[t] and not self.retry(t, tcs, manual):
+                if self.stop == 'time':
+                    break
         self.deadline = float('inf')
-        return min(runs, key=lambda r: (len(r[1]), len(r[0])))   # 수동이 적은 쪽, 그다음 TC가 적은 쪽
+        return tcs, manual
+
+    def retry(self, t, tcs, manual):
+        """t 하나만 큰 상한으로 다시 푼다. 찾으면 TC를 더하고 그 TC가 채우는 수동 분기를 뺀다."""
+        req = dict(bc.need(*t))
+        V = None if t in self.plain else self.solve(req, {t}, LIMIT * 100)
+        if V is None and self.stop != 'time':
+            V = self.solve(req, set(), LIMIT * 100)
+            if V is not None:
+                self.plain.add(t)
+        if V is None:
+            return False
+        full = {v: V.get(v, 0) for v in self.cols}
+        res = self.run(full)
+        got = {u for u in manual if res.get(u[0]) == u[1] and
+               (u in self.plain or self.boundary(*u, Defaults(full)))}
+        got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in manual}
+        if t not in got:
+            return False
+        tcs.append((full, res, got))
+        for u in got:
+            del manual[u]
+        return True
 
     def greedy(self, todo, manual):
         tcs = []
