@@ -569,6 +569,9 @@ class Model:
     def cands_for(self, v, req):
         """req 경로의 조건에 나온 숫자로만 만든 v의 후보 (다른 분기 숫자는 섞지 않는다)."""
         ds = frozenset(d for d in req if v in self.vars.get(d, ()))
+        if not any(v in self.own.get(d, ()) for d in ds):
+            # 앞 분기 결과로만 값에 끼는 변수 (if (mode == 3) t = x; → mode): 그 분기를 뒤집는 숫자도 후보로
+            ds |= {d for d in self.own if v in self.own[d]}
         if (v, ds) not in self.ccache:
             self.ccache[(v, ds)] = self.expand(v, {n for d in ds for n in self.dnums[d]}) if ds else self.cands[v]
         return self.ccache[(v, ds)]
@@ -875,28 +878,44 @@ class Model:
         V = dict(start or {})
         best, full, nodes = self.score(Defaults(V), req), 100 * len(req), 0
         while best < full:
-            better, bad = None, None
-            # 후보 숫자로 먼저, 하나도 안 나아지면 변수 하나로 풀어 본 값으로 (더한 값의 크기 비교 등)
-            # (묶을 때 start 에서 시작하는 짧은 탐색은 후보 숫자만: 풀어 보기는 분기 하나만 풀 때 시간을 쓴다)
-            for v, xs in [(v, cl[v]) for v in vs] + ([(v, None) for v in vs] if start is None else []):
-                if xs is None and bad is None:   # 아직 못 맞춘 결정문만 풀어 본다
-                    W, memo = Defaults(V), {}
-                    bad = {d: o for d, o in req.items() if self.outcome(d, W, memo) != o}
-                for x in (xs if xs is not None else self.lin(v, V, bad)):
-                    if x == V.get(v, 0):
-                        continue
-                    nodes += 1
-                    if nodes > limit:
-                        self.stop = 'limit'
-                        return None
-                    if nodes % 64 == 0 and time.monotonic() > self.deadline:
-                        self.stop = 'time'
-                        return None
-                    s = self.score(Defaults({**V, v: x}), req)
-                    if s > best:
-                        better, best = {**V, v: x}, s
-                        break
-                if better:
+            better = None
+
+            def moves():
+                """후보 숫자로 먼저, 하나도 안 나아지면 변수 하나로 풀어 본 값, 그다음 앞 분기를 뒤집는 변수(gate)를
+                후보로 바꾼 뒤 풀어 본 값 (if (mode == 2) t = y * 0.1f; 에서 mode 2 + y 15.1).
+                묶을 때 start 에서 시작하는 짧은 탐색은 후보 숫자만 (풀어 보기는 분기 하나만 풀 때 시간을 쓴다)."""
+                for v in vs:
+                    for x in cl[v]:
+                        yield {v: x}
+                if start is not None:
+                    return
+                W, memo = Defaults(V), {}
+                bad = {d: o for d, o in req.items() if self.outcome(d, W, memo) != o}   # 아직 못 맞춘 결정문만
+                for v in vs:
+                    for x in self.lin(v, V, bad):
+                        yield {v: x}
+                gates = [w for w in vs if not any(w in self.own.get(d, ()) for d in bad)]
+                owns = [v for v in vs if v not in gates]
+                for w in gates:
+                    for xw in cl[w]:
+                        V1 = {**V, w: xw}
+                        for v in owns:
+                            for x in self.lin(v, V1, bad):
+                                yield {w: xw, v: x}
+
+            for upd in moves():
+                if all(V.get(k, 0) == x for k, x in upd.items()):
+                    continue
+                nodes += 1
+                if nodes > limit:
+                    self.stop = 'limit'
+                    return None
+                if nodes % 64 == 0 and time.monotonic() > self.deadline:
+                    self.stop = 'time'
+                    return None
+                s = self.score(Defaults({**V, **upd}), req)
+                if s > best:
+                    better, best = {**V, **upd}, s
                     break
             if better is None:
                 return None   # 더 나아지지 않음

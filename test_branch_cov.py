@@ -404,6 +404,12 @@ def test_follow():
     ms = bva.Model(bc.parse(bc.strip_code(s_src)), [s_src])
     ts, mans = ms.generate()
     assert not mans and not ms.plain and len(set().union(*(g for _, _, g in ts))) == 10, (mans, ms.plain)
+    # 앞 분기 결과로만 값에 끼는 변수(mode)도 그 분기를 뒤집는 숫자를 후보로 받는다
+    for g_src in ('int f(int mode, int x) { int t = 130; if (mode == 3) { t = x; } if (t < 5) { return 1; } return 0; }',
+                  'int f(int mode, float y) { float t = 0.0f; if (mode == 2) { t = y * 0.1f; } if (t > 1.5f) { return 1; }'
+                  ' return 0; }'):
+        mg = bva.Model(bc.parse(bc.strip_code(g_src)), [g_src])
+        assert not mg.generate()[1], g_src
     # 결과를 모르는 결정문도 D 번호를 차지한다: 뒤 결정문은 D2
     q_src = 'int g_secLv;\nint q(int mode) { int r = 0; if (mode == eSecretRun) { r = 1; } if (g_secLv > 3) { r = 2; } return r; }\n'
     mq = bva.Model(bc.parse(bc.strip_code(q_src)), [q_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])

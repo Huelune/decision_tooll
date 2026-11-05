@@ -22,7 +22,7 @@ import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
-VERSION = '2026-11-05.24'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
+VERSION = '2026-11-05.25'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
