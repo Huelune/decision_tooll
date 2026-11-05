@@ -206,7 +206,7 @@ def constants(srcs, stats=None):
     """#define 상수와 enum 값. #define 식((A + 1), (1 << 3), 캐스트)도 계산하고, 다른 헤더의 상수를 쓰는 것도
     읽는 순서와 상관없이 값이 더 정해지지 않을 때까지 여러 번 돌려 채운다."""
     out = {'NULL': 0, 'TRUE': 1, 'FALSE': 0, 'true': 1, 'false': 0}
-    defs, enums = [], []
+    defs, enums, cdefs = [], [], []   # cdefs: const 변수
     for src in srcs:
         # 함수 꼴 매크로 FOO(x) 는 뺀다 (이름 바로 뒤가 '(')
         for m in re.finditer(r'^[ \t]*#[ \t]*define[ \t]+(\w+)(?!\()[ \t]+([^\n]*?)[ \t]*(?://[^\n]*|/\*[^\n]*)?$',
@@ -215,9 +215,14 @@ def constants(srcs, stats=None):
                 defs.append((m.group(1), m.group(2)))
         for m in re.finditer(r'\benum\b[^{;]*\{([^}]*)\}', bc.strip_code(src)):
             enums.append([item.partition('=') for item in m.group(1).split(',') if item.split('=')[0].strip()])
+        # const 변수도 상수: `static const uint8 c_x = 5u;`, `uint8 const c_x = 5u;`, `CONST(uint8, X) c_x = 5u;`
+        # (포인터 `const T *p`·volatile·배열은 빼기: 이름 앞에 * 나 [ 가 있으면 안 맞는다)
+        for m in re.finditer(r'(?:^|(?<=[;{}]))\s*(?:(?:static|extern)\s+)*(?:const\s+\w+(?:\s+\w+)?|\w+(?:\s+\w+)?\s+const'
+                             r'|CONST\s*\([^()]*\))\s+(\w+)\s*=\s*([^;,{}]+);', bc.strip_code(src), re.M):
+            cdefs.append((m.group(1), m.group(2)))
     for _ in range(10):   # 값이 더 안 늘 때까지 (헤더끼리 서로 참조)
         n = len(out)
-        for name, expr in defs:
+        for name, expr in defs + cdefs:
             if name not in out:
                 try:
                     out[name] = const_eval(expr, out)

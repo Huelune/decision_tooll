@@ -427,6 +427,14 @@ def test_follow():
     mx = bva.Model(px, [x_src])
     assert {'g_secDone', 'g_secVal', 'g_secSt.mode'} <= set(mx.cols), mx.cols
     assert not mx.manual and mx.guessed == {'eSecMode'}, mx.manual
+    # const 변수는 입력이 아니라 상수 (포인터 const·volatile 은 아님)
+    k_src = ('static const uint8 c_secA = 5u;\nuint16 const c_secB = (c_secA + 1u);\n'
+             'CONST(uint8, APPL_CONST) c_secC = 7u;\nconst uint8 *p_sec = 0;\n'
+             'int kf(int v) { if (v > c_secA) { return 1; } if (v == c_secB) { return 2; } return c_secC; }\n')
+    kc = bva.constants([k_src])
+    assert (kc['c_secA'], kc['c_secB'], kc['c_secC']) == (5, 6, 7) and 'p_sec' not in kc, kc
+    mk2 = bva.Model(bc.parse(bc.strip_code(k_src)), [k_src])
+    assert mk2.cols == ['v'] and mk2.cstats['defines'] == 0, (mk2.cols, mk2.cstats)
     # --inc 에 파일을 직접 줘도 (확장자 상관없이) 읽고, 읽은 개수를 화면에
     txt = os.path.join(root, 'secret_defs.txt')
     open(txt, 'w', encoding='utf-8').write('#define eSecretRun (4u)\n#define secret_bad (NOPE + 1)\n')
