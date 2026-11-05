@@ -6,6 +6,7 @@
 
 왜: 12절 결과 0/112. 값을 모르는 이름 9개가 첫 결정문(L121)부터 걸려 모든 경로가 막혔다.
 식으로 된 #define(`#define B (A + 1)`)과 다른 헤더의 상수를 쓰는 enum을 못 읽던 것은 고쳤다.
+특히 Windows 줄 끝(CRLF) 파일에서는 `#define TRUE (1u)` 같은 #define을 하나도 못 읽고 있었다(주석 붙은 줄만 읽힘).
 
 ```
 cd /d D:\codes\decision_tooll

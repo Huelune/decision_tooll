@@ -390,6 +390,11 @@ def test_follow():
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
     assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    # Windows 줄 끝(CRLF) 헤더의 #ifndef 안 #define (전에는 줄 끝 \r 때문에 못 읽었다)
+    crlf = os.path.join(root, 'inc', 'crlf.h')
+    open(crlf, 'wb').write(b'#ifndef LIM_X\r\n#define LIM_X        (7u)\r\n#endif\r\n')
+    assert bva.constants([bc._read(crlf)])['LIM_X'] == 7 and '\r' not in bc._read(crlf)
+    assert bva.constants(['#define LIM_Y   (8u)\r\n'])['LIM_Y'] == 8
     # 헤더끼리 서로 참조하는 상수, 식으로 된 #define, 함수 꼴 매크로는 빼기
     c = bva.constants(['enum { eX = BASE + 1, eY, eZ = LIM2 };\n',
                        '#define LIM2 (BASE * 2)  /* x */\n#define BIT3 (1U << 3)\n#define SQ(x) ((x) * (x))\n'

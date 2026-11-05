@@ -589,9 +589,10 @@ def render_report(r):
 def _read(path):
     raw = open(path, 'rb').read()
     try:
-        return raw.decode('utf-8-sig')
+        text = raw.decode('utf-8-sig')
     except UnicodeDecodeError:
-        return raw.decode('cp949', errors='replace')
+        text = raw.decode('cp949', errors='replace')
+    return text.replace('\r\n', '\n').replace('\r', '\n')   # CRLF면 줄 끝 \r 때문에 #define 등을 못 읽는다
 
 
 def main(argv=None):
