@@ -9,6 +9,7 @@ stub에 &로 넘긴 값은 stub이 바꾸지 않는 것으로 본다.
 """
 import bisect
 import csv
+import math
 import re
 import time
 
@@ -52,6 +53,27 @@ BUDGET = 60    # ponytail: 경계값 계산 전체 시간 한도(초) 기본값.
 
 class Manual(Exception):
     """자동으로 값을 못 정하는 조건. 메시지가 이유."""
+
+
+class Args(list):
+    """함수 호출의 인자 글자들. f() 처럼 비어 있어도 '호출'이라 참."""
+
+    def __bool__(self):
+        return True
+
+
+def _round(x):
+    return math.floor(x + 0.5) if x >= 0 else -math.floor(-x + 0.5)   # C round: 0.5는 0에서 먼 쪽
+
+
+# 표준 수학 함수: stub 코드가 없으면 실제 값으로 계산한다. (함수, 경계 후보를 만들 역함수 또는 None)
+_MATH = {'sqrt': (math.sqrt, lambda n: n * n), 'fabs': (abs, lambda n: -n), 'abs': (abs, lambda n: -n),
+         'labs': (abs, lambda n: -n), 'pow': (math.pow, None), 'floor': (math.floor, None),
+         'ceil': (math.ceil, None), 'round': (_round, None), 'exp': (math.exp, math.log),
+         'log': (math.log, math.exp), 'log10': (math.log10, lambda n: 10 ** n), 'sin': (math.sin, math.asin),
+         'cos': (math.cos, math.acos), 'tan': (math.tan, math.atan), 'atan': (math.atan, math.tan),
+         'atan2': (math.atan2, None), 'fmin': (min, None), 'fmax': (max, None), 'hypot': (math.hypot, None)}
+MATH = {**_MATH, **{k + 'f': v for k, v in _MATH.items() if k not in ('abs', 'labs')}}   # sqrtf 등
 
 
 # 수동 이유 원문(이름이 들어 있음) → 화면에 찍을 종류. 앞에 있는 것부터 본다
@@ -123,13 +145,22 @@ def translate(cond, consts, var_of=None):
             raise Manual(f'못 다루는 식 ({t})' if t else '못 다루는 식')
         t = re.sub(r'\s+', '', t)
         call = peek() == '('
-        if call:   # 인자는 보지 않는다 (stub)
-            d = 0
+        if call:   # 인자 글자들을 모은다 (계산할지는 var_of가 정한다)
+            at[0] += 1
+            d, cur, call = 1, [], Args()
             while at[0] < len(toks):
-                d += (toks[at[0]] == '(') - (toks[at[0]] == ')')
+                tk = toks[at[0]]
                 at[0] += 1
+                d += (tk == '(') - (tk == ')')
                 if d == 0:
                     break
+                if tk == ',' and d == 1:
+                    call.append(' '.join(cur))
+                    cur = []
+                else:
+                    cur.append(tk)
+            if cur or call:
+                call.append(' '.join(cur))
         if not call and t in consts:
             x = consts[t]
             nums.append(x)
@@ -230,6 +261,7 @@ class Stubs:
 
     def __init__(self, src='', consts=None, zero=True):
         self.zero, self.fns, self.note, self.rtype = zero, {}, {}, {}
+        self.pfns = {}   # 인자를 쓰는 반환식: 이름 -> (인자 이름들, 반환식) — Model이 호출 자리 인자로 계산
         clean = bc.strip_code(src)
         for m in re.finditer(r'\b([A-Za-z_]\w*)\s*\(([^()]*)\)\s*\{', clean):
             name = m.group(1)
@@ -237,8 +269,8 @@ class Stubs:
                 continue
             self.rtype[name] = re.split(r'[;}]', clean[:m.start()])[-1].strip()
             body = clean[m.end():_close(clean, m.end() - 1)]
-            params = {re.findall(r'\w+', p)[-1] for p in m.group(2).split(',')
-                      if re.findall(r'\w+', p) and p.strip() != 'void'}
+            params = [re.findall(r'\w+', p)[-1] for p in m.group(2).split(',')
+                      if re.findall(r'\w+', p) and p.strip() != 'void']
             rets = re.findall(r'\breturn\b\s*([^;]*);', body)
             if len(rets) != 1 or not rets[0].strip():
                 self.note[name] = '반환문이 하나가 아님'
@@ -246,18 +278,21 @@ class Stubs:
             try:
                 self.fns[name] = translate(rets[0], consts or {}, lambda t, call, ps=params: self._glob(t, call, ps))
             except Manual as e:
-                self.note[name] = str(e)
+                if str(e) == '인자':
+                    self.pfns[name] = (params, rets[0])
+                else:
+                    self.note[name] = str(e)
 
     @staticmethod
     def _glob(t, call, ps):
         if call or re.match(r'\w+', t).group() in ps:
-            raise Manual('인자나 다른 함수에 따라 달라짐')
+            raise Manual('인자')   # 인자나 다른 함수를 쓰면 호출 자리에서 계산 (pfns)
         return _var(t)
 
     def ref(self, name):
         if name in self.fns:
             return self.fns[name]
-        if self.zero and name not in self.note:
+        if self.zero and name not in self.note and name not in self.pfns:
             return _fixed(0)
         return _var(name + '()')
 
@@ -265,8 +300,12 @@ class Stubs:
         if name in self.fns:
             f, vs, _ = self.fns[name]
             return f"stub 코드: {', '.join(vs)} 값" if vs else f'stub 코드: {f({}, None)} 고정'
+        if name in self.pfns:
+            return 'stub 코드: 인자로 계산'
         if name in self.note:
             return f'stub 반환값 자유 입력 (stub 코드: {self.note[name]})'
+        if name in MATH:
+            return '표준 수학 함수: 실제 값으로 계산'
         return 'stub 정의 없음 → 0 고정' if self.zero else 'stub 반환값 자유 입력'
 
 
@@ -281,7 +320,7 @@ def needed_stubs(parsed):
             if c[max(m.start() - 1, 0):m.start()] == '.' or c[max(m.start() - 2, 0):m.start()] == '->':
                 continue
             if c[m.end():m.end() + 1] == '(':
-                if t != 'sizeof' and not t.isupper() and t not in out:
+                if t != 'sizeof' and not t.isupper() and t not in out and t not in MATH:
                     out.append(t)
                 continue
             a = info['body'].get(func, (0, 0))[0]
@@ -332,12 +371,23 @@ class Model:
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
             try:
-                self.via, self.leaf = False, set()
+                self.via, self.leaf, self.inv = False, set(), []
                 f, vs, nums = translate(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
                 if self.via:   # 대입을 거친 값: 조건 숫자 ± 대입 식 숫자도 경계 후보로 (v = a + 5; v > 100 → a 95)
                     cn = translate(d.cond, self.consts, lambda t, call: _fixed(0))[2]
                     nums = list(dict.fromkeys(nums))
-                    nums = nums + [n + k * m for n in cn for m in nums for k in (1, -1)]
+                    nums = nums + [n + k * m for n in cn for m in nums for k in (1, -1)] + \
+                        [_cdiv(n, m) for n in cn for m in nums if m and n % m == 0]   # twice(a) > 10 → 5 (정수는 정수로)
+                if self.inv:   # 수학 함수: 조건 숫자를 역함수로 옮긴 값 (sqrt(x) > 3 → x 9)
+                    cn = translate(d.cond, self.consts, lambda t, call: _fixed(0))[2]
+                    for g in self.inv:
+                        for n in cn:
+                            try:
+                                y = g(n)
+                            except (ValueError, OverflowError):
+                                continue
+                            if isinstance(y, (int, float)) and abs(y) < 1e9:
+                                nums.append(round(y, 6))
                 if d.kind == 'switch':
                     self.labels[d] = {lab: const_eval(lab[5:], self.consts) for lab, _ in d.labels if lab != 'default'}
                     nums += list(self.labels[d].values())
@@ -364,9 +414,33 @@ class Model:
                 vals = {int(x) for x in vals}
             self.cands[v] = sorted(vals, key=lambda x: (x < 0, abs(x)))   # 0 이상 작은 값부터
 
-    def var_of(self, t, call, d, pos=None):
+    def var_of(self, t, call, d, pos=None, depth=0):
         if not call:
             return self.value(t, d.pos if pos is None else pos, d)
+        if depth > 8:
+            raise Manual('stub 호출이 너무 깊음')
+        here = d.pos if pos is None else pos
+
+        def args():   # 호출 자리의 인자 값들
+            out = [translate(a, self.consts, lambda n, c: self.var_of(n, c, d, here, depth + 1)) for a in call]
+            return [a[0] for a in out], [v for a in out for v in a[1]], [n for a in out for n in a[2]]
+
+        if t in self.stubs.pfns:   # 인자를 쓰는 stub 코드: 반환식에 인자 값을 넣는다
+            ps, ret = self.stubs.pfns[t]
+            fs, vs, ns = args()
+            if len(fs) != len(ps):
+                raise Manual(f'{t}: 인자 개수가 stub 코드와 다름')
+            bind = dict(zip(ps, zip(fs, [vs] * len(fs), [ns] * len(fs))))
+            self.via = True   # 조건 숫자를 인자 쪽으로 옮긴 후보도 쓴다 (twice(a) > 10 → a 5)
+            return translate(ret, self.consts, lambda n, c: (
+                bind[n] if not c and n in bind else
+                _var(n) if not c else self.var_of(n, c, d, here, depth + 1)))
+        if t in MATH and t not in self.stubs.fns and t not in self.stubs.note:
+            fn, inv = MATH[t]
+            fs, vs, ns = args()
+            if inv:
+                self.inv.append(inv)
+            return (lambda V, R: fn(*(f(V, R) for f in fs))), vs, ns
         r = self.stubs.ref(t)
         self.leaf.update(r[1])
         if not r[1]:

@@ -227,7 +227,20 @@ def test_bva():
     assert s.ref('a')[1] == ['a()'] and s.ref('c')[1] == ['c()']
     assert s.ref('zz')[0]({}, None) == 0 and s.ref('zz')[1:] == ([], [0])
     assert bva.Stubs('', zero=False).ref('zz')[1] == ['zz()']
-    assert s.desc('b') == 'stub 코드: 3 고정' and '자유 입력' in s.desc('a') and '0 고정' in s.desc('zz')
+    assert s.desc('b') == 'stub 코드: 3 고정' and s.desc('a') == 'stub 코드: 인자로 계산' and '0 고정' in s.desc('zz')
+    assert '자유 입력' in s.desc('c') and '수학 함수' in s.desc('sqrt')
+
+    # 표준 수학 함수는 실제 값으로, 인자를 쓰는 stub 코드는 호출 자리 인자로 계산한다
+    q_src = 'int q(int x, float y, int a) { if (sqrt(x) > 3) { return 1; } if (fabsf(y) < 2.5f) { return 2; }'             ' if (twice(a + 1) > 10) { return 3; } return 0; }'
+    pq = bc.parse(bc.strip_code(q_src))
+    mq = bva.Model(pq, [q_src], 'int twice(int v) { return v * 2; }')
+    tcs, manual = mq.generate()
+    assert not manual and bva.needed_stubs(pq) == ['twice'], (manual, bva.needed_stubs(pq))
+    d1, d2, d3 = sorted(pq[0], key=lambda d: d.pos)
+    vals = {(d.pos, o): V for V, _, g in tcs for d, o in g}
+    assert vals[(d1.pos, 'T')]['x'] == 10 and vals[(d1.pos, 'F')]['x'] == 9, vals   # sqrt 경계 9 / 10
+    assert abs(vals[(d2.pos, 'T')]['y']) in (2.4,) and abs(vals[(d2.pos, 'F')]['y']) == 2.5, vals
+    assert vals[(d3.pos, 'T')]['a'] == 5 and vals[(d3.pos, 'F')]['a'] == 4, vals      # (a+1)*2 > 10
     assert bc.values(bc.need(p[0][2], 'T'), p[3], s)['get_temp'] == 'stub 정의 없음 → 0 고정'
 
     # 입력으로 정해지는 반복문: 들어가는 TC는 [T/F]로 적고 F도 채운 것으로 본다
