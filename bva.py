@@ -681,7 +681,12 @@ class Model:
         word = {None: 'x', 'limit': '상', 'time': '시', 'ok': 'o'}   # 범례는 branch_cov 화면에
         tried = ''.join(word.get(r, '?') for _, _, r in self.trace.get(t, [])[-8:])
         cand = max((len(self.cands_for(v, dict(path))) for v in allv), default=0)
-        return f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · 고정stub {len(fixed)} · 탐색 {tried}'
+        # 조건 모양 (연산자 기호만, 이름 없음): 함수 호출 수, 비교 양변으로 푼 조각 수
+        c = re.sub(r'->|\.', ' ', bc.norm(t[0].cond))
+        ops = ''.join(dict.fromkeys(re.findall(r'&&|\|\||==|!=|<=|>=|<<|>>|[-+*/%&|^<>!~?]', c)))
+        calls = len(re.findall(r'\b(?!sizeof\b)[A-Za-z_]\w*\s*\(', c))
+        return (f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · 고정stub {len(fixed)}'
+                f' · 탐색 {tried:<8} · 식 {ops} 호출{calls} 풀이{len(self.cmps.get(t[0], ()))}')
 
     def why_not(self, t, stop=None):
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
