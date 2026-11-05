@@ -677,6 +677,10 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60):
     if plain:   # 갈 수는 있지만 경계 바로 옆 값이 없는 분기 (예: 바깥 조건이 더 좁음)
         lines.append(f'  그중 경계가 아닌 값으로 채운 분기 {len(got & m.plain)}개  ' +
                      ' '.join(f'L{x}' for x in plain[:8]) + (' …' if len(plain) > 8 else ''))
+    if stub_src.strip():   # 넣은 stub 코드가 실제로 쓰였는지 (이름 없이 개수만)
+        n, used, free, mth = m.stubs.counts()
+        lines.append(f'stub 코드 함수 {n}개: 반환식으로 계산 {used}개 · 수학 함수 이름이라 실제 값 {mth}개'
+                     f' · 자유 입력 {free}개 (반환문이 여럿 등)')
     lines.append(f'자동으로 못 만든 분기 {len(manual)}개' + ('  (이유 종류별, L=줄 번호)' if manual else ''))
     kinds = {}
     for (d, o), why in manual.items():

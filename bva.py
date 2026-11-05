@@ -289,6 +289,12 @@ class Stubs:
             raise Manual('인자')   # 인자나 다른 함수를 쓰면 호출 자리에서 계산 (pfns)
         return _var(t)
 
+    def counts(self):
+        """화면용 숫자: (읽은 함수, 계산에 쓰는 것, 자유 입력, 그중 수학 함수 이름이라 실제 값으로 계산)"""
+        math_named = sum(n in MATH for n in self.note)
+        return (len(self.fns) + len(self.pfns) + len(self.note), len(self.fns) + len(self.pfns),
+                len(self.note) - math_named, math_named)
+
     def ref(self, name):
         if name in self.fns:
             return self.fns[name]
@@ -302,10 +308,10 @@ class Stubs:
             return f"stub 코드: {', '.join(vs)} 값" if vs else f'stub 코드: {f({}, None)} 고정'
         if name in self.pfns:
             return 'stub 코드: 인자로 계산'
-        if name in self.note:
-            return f'stub 반환값 자유 입력 (stub 코드: {self.note[name]})'
         if name in MATH:
             return '표준 수학 함수: 실제 값으로 계산'
+        if name in self.note:
+            return f'stub 반환값 자유 입력 (stub 코드: {self.note[name]})'
         return 'stub 정의 없음 → 0 고정' if self.zero else 'stub 반환값 자유 입력'
 
 
@@ -435,7 +441,8 @@ class Model:
             return translate(ret, self.consts, lambda n, c: (
                 bind[n] if not c and n in bind else
                 _var(n) if not c else self.var_of(n, c, d, here, depth + 1)))
-        if t in MATH and t not in self.stubs.fns and t not in self.stubs.note:
+        # 수학 함수: stub 코드가 반환식 하나로 따로 정하지 않았으면 (실제 구현을 넣은 것도) 실제 값으로
+        if t in MATH and t not in self.stubs.fns:
             fn, inv = MATH[t]
             fs, vs, ns = args()
             if inv:

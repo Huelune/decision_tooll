@@ -241,6 +241,21 @@ def test_bva():
     assert vals[(d1.pos, 'T')]['x'] == 10 and vals[(d1.pos, 'F')]['x'] == 9, vals   # sqrt 경계 9 / 10
     assert abs(vals[(d2.pos, 'T')]['y']) in (2.4,) and abs(vals[(d2.pos, 'F')]['y']) == 2.5, vals
     assert vals[(d3.pos, 'T')]['a'] == 5 and vals[(d3.pos, 'F')]['a'] == 4, vals      # (a+1)*2 > 10
+    # 수학 함수 이름으로 실제 구현(반환문 여럿)을 넣어도 실제 값으로 계산하고, 화면에는 개수만
+    impl = ('float sqrt(float v) { float r = v; int i; for (i = 0; i < 20; i++) {'
+            ' if (r == 0) return 0; r = (r + v / r) / 2; } return r; }\n')
+    mq = bva.Model(pq, [q_src], impl + 'int twice(int v) { return v * 2; }')
+    tcs, manual = mq.generate()
+    assert not manual and mq.stubs.counts() == (2, 1, 0, 1), mq.stubs.counts()
+    d = tempfile.mkdtemp()
+    c_path, s_path = os.path.join(d, 'secret_q.c'), os.path.join(d, 'secret_stub.c')
+    open(c_path, 'w', encoding='utf-8').write(q_src.replace('twice', 'secret_twice'))
+    open(s_path, 'w', encoding='utf-8').write(impl + 'int secret_twice(int v) { return v * 2; }')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path, '--stub', s_path]) == 0
+    out = buf.getvalue()
+    assert 'secret' not in out.lower() and 'stub 코드 함수 2개' in out and '4/6 채움' not in out, out
     assert bc.values(bc.need(p[0][2], 'T'), p[3], s)['get_temp'] == 'stub 정의 없음 → 0 고정'
 
     # 입력으로 정해지는 반복문: 들어가는 TC는 [T/F]로 적고 F도 채운 것으로 본다
