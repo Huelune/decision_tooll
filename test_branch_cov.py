@@ -368,6 +368,36 @@ def test_follow():
     tcs, manual = bva.Model(ps, [sh]).generate()
     assert not manual and len(set().union(*(g for _, _, g in tcs))) == 102, manual
 
+    # 대소문자 섞인 enum 값을 입력으로 착각하지 않는다: 값을 모르면 상수 값 모름, --inc 로 헤더 폴더를 주면 푼다
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, 'src'))
+    os.makedirs(os.path.join(root, 'inc', 'sub'))
+    e_src = ('int g_secretLevel;\n'
+             'int e(int mode) { if (mode == eSecretRun) { return 1; } if (g_secretLevel > 3) { return 2; } return 0; }\n')
+    c_path = os.path.join(root, 'src', 'secret_e.c')
+    open(c_path, 'w', encoding='utf-8').write(e_src)
+    open(os.path.join(root, 'inc', 'sub', 'secret.h'), 'w', encoding='utf-8').write(
+        'typedef enum { eSecretIdle, eSecretRun = 4 } secret_mode_t;\n')
+    pe = bc.parse(bc.strip_code(e_src))
+    me = bva.Model(pe, [e_src])
+    assert 'eSecretRun' not in me.cols and 'g_secretLevel' in me.cols and '상수 값 모름' in me.manual[pe[0][0]]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path]) == 0
+    out = buf.getvalue()
+    assert 'secret' not in out.lower() and '값을 모르는 상수 1개' in out and '--inc' in out, out
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
+    assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    # --path: TC 하나의 예상 경로를 줄 번호·결과로만 (switch는 case 줄 번호)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main(['example.c', '--func', 'example', '--path', '1']) == 0
+    out = buf.getvalue()
+    assert 'TC1 예상 경로' in out and 'L6' in out and ('case' in out or 'default' in out), out
+    assert len(out.splitlines()) <= 40
+
     # TC 없이 명령줄: 결정문 종류와 경계값 요약을 이유 종류로만 찍는다 (이름이 화면에 안 나온다)
     src = (F_SRC.replace('sum', 'secret_sum').replace('Stub_', 'Secret_stub_')
            .replace('(v > 100)', '(v > SECRET_LIMIT)'))
@@ -429,6 +459,11 @@ def test_gui():
     # stub 탭: 예시는 stub이 없어 뼈대가 안 붙고, 직접 쓴 stub 코드는 채우는 법에 나온다
     import bva
     assert bva.needed_stubs(app.parsed) == []   # 예시 함수에는 분기에 값이 들어가는 stub이 없다
+    hdir = tempfile.mkdtemp()
+    open(os.path.join(hdir, 'x.h'), 'w', encoding='utf-8').write('enum { eA = 2 };')
+    g.messagebox.showinfo = lambda *a, **k: None
+    app.add_inc(hdir)   # 헤더 폴더: 다음 경계값 계산부터 쓰고 C 파일을 바꿔도 유지
+    assert len(app.inc) == 1 and app.inc[0] in app.headers
     app.stub.insert('1.0', 'int x_stub(void) { return 7; }')
     assert app.stubs().desc('x_stub') == 'stub 코드: 7 고정'
 

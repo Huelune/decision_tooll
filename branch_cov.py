@@ -1,7 +1,7 @@
 """실행 전 분기 커버리지 추정기 (C, decision coverage).
 
 사용: python branch_cov.py <C 파일> [TC 표기 파일] [--func 함수이름] [--csv 경계값TC.csv]
-                          [--stub stub코드.c] [--stub-free] [--time 초]
+                          [--stub stub코드.c] [--stub-free] [--time 초] [--inc 헤더폴더] [--path N]
 
 TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형식
 (if / else if / elseif / else / case / default / while / for).
@@ -603,6 +603,9 @@ def main(argv=None):
     ap.add_argument('--stub', help='직접 쓴 stub 코드 파일 (반환식을 계산에 씀)')
     ap.add_argument('--stub-free', action='store_true', help='정의 안 한 stub 반환값을 0 대신 자유 입력으로')
     ap.add_argument('--time', type=float, default=60, help='경계값 TC 계산 시간 한도(초), 기본 60')
+    ap.add_argument('--path', type=int, help='경계값 TC 중 N번의 예상 경로를 줄 번호로 찍는다 (실제 결과와 비교용)')
+    ap.add_argument('--inc', action='append', default=[],
+                    help='enum·#define 값을 찾을 헤더 폴더 (하위 폴더까지, 여러 번 줄 수 있음)')
     a = ap.parse_args(argv)
     os.system('cls' if os.name == 'nt' else 'clear')  # 고정 문자열이라 주입 위험 없음
     rpt = os.path.join(tempfile.gettempdir(), REPORT)
@@ -625,7 +628,8 @@ def main(argv=None):
         parsed = parse(strip_code(src), a.func)
         r = analyze('', tc_text, parsed=parsed)
         # TC 표기 파일이 없으면 경계값 TC로 얼마나 채울 수 있는지 보여 준다 (CSV는 --csv 줄 때만)
-        extra = (make_bva(parsed, [src] + headers_near(a.c_file), a.csv, stub_src, not a.stub_free, a.time)
+        heads = headers_near(a.c_file) + [h for d in a.inc for h in headers_in(d)]
+        extra = (make_bva(parsed, [src] + heads, a.csv, stub_src, not a.stub_free, a.time, a.path)
                  if a.csv or not a.tc_file else None)
     except LookupError:
         print('오류: --func 로 준 함수를 C 파일에서 못 찾음 — 함수 이름을 확인하세요')
@@ -647,8 +651,13 @@ def main(argv=None):
 
 def headers_near(c_path):
     """C 파일과 같은 폴더의 .h (상수 값과 형을 찾는 데만 쓴다)."""
+    return headers_in(os.path.dirname(os.path.abspath(c_path)), False)
+
+
+def headers_in(folder, deep=True):
+    """폴더(deep이면 하위 폴더까지)의 .h 내용들. enum·#define 값과 변수 선언을 찾는 데 쓴다."""
     out = []
-    for h in glob.glob(os.path.join(os.path.dirname(os.path.abspath(c_path)), '*.h')):
+    for h in glob.glob(os.path.join(folder, '**' if deep else '', '*.h'), recursive=deep):
         try:
             out.append(_read(h))
         except OSError:
@@ -656,7 +665,7 @@ def headers_near(c_path):
     return out
 
 
-def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60):
+def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, path_n=None):
     """경계값 TC를 만들고 csv_path가 있으면 CSV로 쓴다 → (화면 요약 줄들, 상세 보고서에 붙일 글).
     화면에는 개수·줄 번호·이유 종류만 찍는다 (이유 원문에는 변수·상수 이름이 들어 있다)."""
     import bva
@@ -689,13 +698,40 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60):
         ls = sorted(set(lns))
         lines.append(f'  {k:<20} {len(lns):>3}개  ' + ' '.join(f'L{x}' for x in ls[:8]) +
                      (' …' if len(ls) > 8 else ''))
+    unknown = sorted({n for w in manual.values() for n in re.findall(r'상수 값 모름 \((\w+)\)', w)})
+    if unknown:   # 값을 모르는 상수는 사용자에게 받아야 한다 (이름은 상세 파일에만)
+        lines.append(f'  값을 모르는 상수 {len(unknown)}개 — 정의된 헤더 폴더를 --inc 폴더 로 주세요 (이름은 상세 파일)')
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
         lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
                      'o 찾음 x 없음 상 상한 시 시간')
         lines += [f'    L{d.line_of(o)} {o:<4} {m.diagnose((d, o))}' for d, o in sorted(manual, key=lambda t: t[0].pos)]
+    if path_n:   # 실제 도구 결과와 맞춰 보기: TC 하나의 예상 경로를 줄 번호·결과로만
+        lines += path_lines(m, tcs, path_n)
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
     text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
+    text += ['', '# 값을 모르는 상수 (정의된 헤더 폴더를 --inc 로)'] + unknown
     return lines, '\n'.join(text) + '\n'
+
+
+def path_lines(m, tcs, n):
+    """TC n이 지나갈 것으로 계산한 분기들. switch는 case 이름 대신 그 case 줄 번호만 (이름은 내부 정보)."""
+    if not 1 <= n <= len(tcs):
+        return [f'--path {n}: TC는 1~{len(tcs)} 중에서 고르세요']
+    res = tcs[n - 1][1]
+    items = []
+    for d in m.decs:
+        if d not in res:
+            continue
+        o = res[d]
+        if o is None:
+            items.append(f'L{d.line} ?')
+        elif d.kind == 'switch':
+            items.append(f"L{d.line_of(o)} {'default' if o == 'default' else 'case'}")
+        else:
+            items.append(f"L{d.line} {'T/F' if o == 'T' and d.kind in ('while', 'for', 'dowhile') else o}")
+    out = [f'TC{n} 예상 경로 {len(items)}개 (코드 순서, ? = 계산 못 함) — 실제 도구에서 처음 다른 줄을 찾아 주세요']
+    out += ['  ' + '  '.join(f'{x:<11}' for x in items[i:i + 9]).rstrip() for i in range(0, len(items), 9)]
+    return out
 
 
 def utf8_output():

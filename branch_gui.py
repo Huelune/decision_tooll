@@ -12,6 +12,7 @@ TC 표기는 왼쪽 끝에 붙인다. 같은 폴더의 .h에서 #define·enum �
 """
 import argparse
 import os
+import re
 import tempfile
 import tkinter as tk
 import traceback
@@ -28,12 +29,14 @@ class App:
         self.root, self.src, self.parsed, self.tc_path, self.saved = root, '', None, None, ''
         self.active_func = ALL
         self.job, self.rows, self.result, self.headers, self.manual = None, {}, None, [], {}
+        self.inc = []   # [헤더 폴더 추가]로 고른 폴더의 .h 내용 (C 파일을 바꿔도 유지)
         root.title('분기 커버리지 도우미')
         root.geometry('1100x700')
 
         top = ttk.Frame(root, padding=4)
         top.pack(fill='x')
         ttk.Button(top, text='C 파일 열기', command=self.open_c).pack(side='left')
+        ttk.Button(top, text='헤더 폴더 추가', command=self.add_inc).pack(side='left')
         ttk.Label(top, text='  함수').pack(side='left')
         self.func = ttk.Combobox(top, state='readonly', width=28)
         self.func.pack(side='left')
@@ -102,10 +105,20 @@ class App:
         if path:
             self.load_c(path)
 
+    def add_inc(self, folder=None):
+        """enum·#define 값을 찾을 헤더 폴더 (하위 폴더까지). 다음 [경계값 TC 만들기]부터 쓴다."""
+        folder = folder or filedialog.askdirectory(title='enum·#define이 정의된 헤더 폴더')
+        if not folder:
+            return
+        hs = bc.headers_in(folder)
+        self.inc += hs
+        self.headers += hs
+        messagebox.showinfo('헤더 폴더', f'헤더 {len(hs)}개를 읽었습니다. [경계값 TC 만들기]를 다시 누르세요.')
+
     def load_c(self, path, func=None):
         # 다 읽고 해석에 성공한 뒤에만 바꾼다 (실패하면 보던 파일 그대로)
         try:
-            src, headers = bc._read(path), bc.headers_near(path)
+            src, headers = bc._read(path), bc.headers_near(path) + self.inc
             funcs = bc.parse(bc.strip_code(src))[2]
             f = func if func in funcs else (funcs[0] if len(funcs) == 1 else ALL)
             parsed = bc.parse(bc.strip_code(src), None if f == ALL else f)
@@ -169,10 +182,13 @@ class App:
         self.refresh()
         if not csv_path:
             timeout = sum('시간 한도' in w for w in manual.values())
+            unknown = {n for w in manual.values() for n in re.findall(r'상수 값 모름 \((\w+)\)', w)}
             messagebox.showinfo('경계값 TC', f'TC {len(tcs)}개를 만들었습니다.\n'
                                          f'자동으로 못 만든 분기 {len(self.manual)}개는 아래 목록에 이유가 있습니다.' +
                                 (f'\n그중 {timeout}개는 시간 한도에 걸렸습니다. 위 "시간 한도(초)"를 늘려 다시 해 보세요.'
-                                 if timeout else ''))
+                                 if timeout else '') +
+                                (f'\n값을 모르는 상수(enum 등) {len(unknown)}개: [헤더 폴더 추가]로 정의된 폴더를 주세요.'
+                                 if unknown else ''))
 
     def parse_failed(self):
         with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:

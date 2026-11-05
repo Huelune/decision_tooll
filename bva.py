@@ -366,7 +366,8 @@ class Model:
         self.consts = constants(srcs + [stub_src])
         self.stubs = Stubs(stub_src, self.consts, stub_zero)
         self.fixed, self.float_hint = {}, set()   # 결정문 -> 고정값 stub 이름들 / float stub 반환 변수
-        text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
+        text = self.text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
+        self.isvar = {}
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
@@ -502,6 +503,9 @@ class Model:
         if not hits:
             if base in self.info['locals'].get(d.func, ()) and base not in self.info['params'].get(d.func, ()):
                 return _fixed(0)   # ponytail: 대입 전 지역 변수는 0으로 본다 (모든 갈래에서 대입하면 안 쓰임)
+            if base not in self.info['params'].get(d.func, ()) and not self.declared_var(base):
+                # 인자도 지역·전역 변수도 아님 → enum 값이나 다른 헤더의 상수. 입력으로 만들면 경로가 틀어진다
+                raise Manual(f'상수 값 모름 ({base})')
             self.leaf.add(t)
             return _var(t)
         self.via = True
@@ -569,6 +573,14 @@ class Model:
         if stop == 'limit':
             return '값 조합이 많아 탐색 상한에 걸림' + hint
         return '갈 수 없는 경로이거나 후보 밖 값이 필요함 (경로 조건을 모두 만족하는 값이 없음)' + hint
+
+    def declared_var(self, name):
+        """읽은 코드·헤더 어딘가에 `형 [*]name;`·`= …`·`[`·`,`·`)` 꼴로 변수로 선언됐는가."""
+        if name not in self.isvar:
+            self.isvar[name] = bool(re.search(
+                rf'\b(?!(?:return|case|goto|else|sizeof|if|while|switch)\b)[A-Za-z_]\w*[\s*]+{re.escape(name)}'
+                rf'\s*(?:[;=,)]|\[)', self.text))
+        return self.isvar[name]
 
     @staticmethod
     def declared(v, pat, text):
@@ -708,13 +720,15 @@ class Model:
                         pass
         return s
 
-    def climb(self, req, bnd, limit=LIMIT):
-        """나머지는 0으로 두고, 변수 하나를 바꿔 맞는 조각이 늘면 그 값을 두고 다음으로 (사람이 하나씩 맞추듯)."""
+    def climb(self, req, bnd, limit=LIMIT, start=None):
+        """나머지는 0으로 두고(start가 있으면 그 값에서), 변수 하나를 바꿔 맞는 조각이 늘면 그 값을 두고
+        다음으로 (사람이 하나씩 맞추듯)."""
         self.stop = None
         ds = sorted(req, key=lambda d: d.pos)
         vs = list(dict.fromkeys(v for d in reversed(ds) for v in self.vars[d]))
         cl = {v: self.cands_for(v, req) for v in vs}
-        V, best, full, nodes = {}, self.score(Defaults(), req), 100 * len(req), 0
+        V = dict(start or {})
+        best, full, nodes = self.score(Defaults(V), req), 100 * len(req), 0
         while best < full:
             better = None
             for v in vs:
@@ -747,8 +761,8 @@ class Model:
         log = self.trace.setdefault(t, [])   # 진단용: (경계?, 빠른?, 결과)
         for bnd in ([] if t in self.plain else [{t}]) + [set()]:
             for focus in ('sparse', 'climb', True, False):   # 1~2개만 → 조각씩 → 경로 조건 변수만 → 전체
-                V = (self.sparse(req, bnd, limit * 10) if focus == 'sparse' else
-                     self.climb(req, bnd, limit * 10) if focus == 'climb' else
+                V = (self.sparse(req, bnd, limit) if focus == 'sparse' else
+                     self.climb(req, bnd, limit) if focus == 'climb' else
                      self.solve(req, bnd, limit, focus))
                 log.append((bool(bnd), focus, 'ok' if V is not None else self.stop))
                 if V is not None:
@@ -783,7 +797,10 @@ class Model:
             if bad:
                 manual[t] = f'L{bad.line} {self.manual[bad]}'
         todo = [t for t in targets if t not in manual]
-        self.deadline, runs, self.plain, self.alone = time.monotonic() + self.budget, [], set(), {}
+        # 시간은 단계별로 나눈다: 하나씩 풀기 40% → 묶기 ~80% → 남은 분기 다시 찾기 ~100%.
+        # (하나씩 풀기가 시간을 다 쓰면 묶지 못해 분기마다 TC가 하나씩 생긴다)
+        t0, runs, self.plain, self.alone = time.monotonic(), [], set(), {}
+        self.deadline = t0 + self.budget * 0.4
         for t in todo:
             V = self.solve_alone(t)
             if V is not None:
@@ -793,11 +810,13 @@ class Model:
             # 상한·시간에 걸린 건 묶음과 3)에서 다시 해 본다
         todo = [t for t in todo if t not in manual]
         deep = sorted(todo, key=lambda t: -len(bc.need(*t)))
-        for order in (todo, deep):
+        for order, end in ((todo, 0.6), (deep, 0.8)):   # 두 번째 순서는 첫 번째가 남긴 시간까지
+            self.deadline = t0 + self.budget * end
             runs.append(self.greedy(order, dict(manual)))
         tcs, manual = min(runs, key=lambda r: (len(r[1]), len(r[0])))   # 수동이 적은 쪽, 그다음 TC가 적은 쪽
+        self.deadline = t0 + self.budget
         for t in sorted(manual, key=lambda t: t[0].pos):
-            if t in manual and '탐색 상한' in manual[t] and not self.retry(t, tcs, manual):
+            if t in manual and ('탐색 상한' in manual[t] or '시간 한도' in manual[t]) and                     not self.retry(t, tcs, manual):
                 if self.stop == 'time':
                     break
         if time.monotonic() > self.deadline:   # 시간이 모자라 다시 찾지 못한 것은 시간 초과로 알린다
@@ -806,6 +825,11 @@ class Model:
                                         f'값 조합이 많고 계산 시간 한도({self.budget:g}초) 안에 못 찾음')
         self.deadline = float('inf')
         return tcs, manual
+
+    def passes(self, V, t):
+        """값 V로 분기 t를 (경계 조건까지) 이미 지나가는가."""
+        W, memo = Defaults(V), {}
+        return all(self.outcome(d, W, memo) == o for d, o in bc.need(*t)) and             (t in self.plain or self.boundary(*t, W))
 
     def cover(self, V, todo):
         """값 V로 todo 중 실제로 채우는 분기 → (전체 값, 지나는 결과, 채운 분기)."""
@@ -840,9 +864,15 @@ class Model:
                 b2 = bnd if t in self.plain else bnd | {t}
                 if V is None and t in self.alone:   # 첫 분기는 혼자 찾아 둔 값 그대로
                     V2 = self.alone[t]
-                elif V is None or time.monotonic() <= self.deadline:
-                    # 묶을 때는 경로 조건 변수만 짧게 찾는다 (앞 분기는 안 타는 쪽). 못 묶으면 다음 TC에서 혼자
-                    V2 = self.solve(r2, b2, LIMIT if V is None else LIMIT // 3, focus=V is not None)
+                elif V is None:
+                    V2 = self.solve(r2, b2, LIMIT)
+                elif self.passes(V, t):   # 지금 값으로 이미 지나가면 그대로 묶는다
+                    V2 = V
+                elif time.monotonic() <= self.deadline:
+                    # 묶을 때는 지금 TC 값에서 몇 개만 바꿔 맞춰 본다 → 안 되면 경로 조건 변수만 짧게 찾는다
+                    V2 = self.climb(r2, b2, LIMIT // 10, start=V)
+                    if V2 is None and self.stop != 'time':
+                        V2 = self.solve(r2, b2, LIMIT // 10, focus=True)
                 else:
                     continue   # 시간이 다 되면 더 묶지 않는다
                 if V2 is not None:
