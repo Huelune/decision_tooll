@@ -242,6 +242,34 @@ def constants(srcs, stats=None):
     return out
 
 
+NOT_TYPE = {'return', 'if', 'else', 'case', 'goto', 'while', 'for', 'switch', 'sizeof', 'do', 'typedef', 'default'}
+
+
+def decl_names(text):
+    """선언문에서 변수 이름을 모두 모은다: `uint8 a, b = 0u, c[3];`, `unsigned char x;`,
+    `static VAR(uint8, AUTOMATIC) s_a, s_b;`. 함수 원형 f(int a)·호출 f(a, B)·대입 x = y 는 빼기."""
+    names = set()
+    for st in re.split(r'[;{}]', text):
+        m = re.match(r'\s*(?:(?:static|extern|const|volatile|register|auto|struct|union|enum)\s+)*'
+                     r'([A-Za-z_]\w*)(\s*\([^()]*,[^()]*\))?([\s*]+)(.*)$', st, re.S)
+        if not m or m.group(1) in NOT_TYPE:
+            continue
+        dep, cur, parts = 0, '', []
+        for ch in m.group(4):   # 맨 바깥 쉼표로 나눈다
+            dep += (ch in '([{') - (ch in ')]}')
+            if ch == ',' and dep == 0:
+                parts.append(cur)
+                cur = ''
+            else:
+                cur += ch
+        parts.append(cur)
+        for p in parts:
+            nm = re.match(r'\s*(?:[A-Za-z_]\w*[\s*]+)*\**\s*([A-Za-z_]\w*)\s*(?:$|=|\[)', p, re.S)
+            if nm and nm.group(1) not in NOT_TYPE:
+                names.add(nm.group(1))
+    return names
+
+
 def closure(reqs):
     """(결정문, 결과)들과 그것들이 평가되려면 필요한 바깥 결과 전부."""
     seen, stack = set(), list(reqs)
@@ -384,7 +412,7 @@ class Model:
         self.stubs = Stubs(stub_src, self.consts, stub_zero)
         self.fixed, self.float_hint = {}, set()   # 결정문 -> 고정값 stub 이름들 / float stub 반환 변수
         text = self.text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
-        self.isvar = {}
+        self.isvar, self.declnames = {}, decl_names(text)
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
@@ -595,7 +623,7 @@ class Model:
         """읽은 코드·헤더 어딘가에 `형 [*]name;`·`= …`·`[`·`,`·`)` 꼴로 변수로 선언됐는가."""
         if name not in self.isvar:
             n = re.escape(name)
-            self.isvar[name] = bool(re.search(
+            self.isvar[name] = name in self.declnames or bool(re.search(
                 rf'\b(?!(?:return|case|goto|else|sizeof|if|while|switch)\b)[A-Za-z_]\w*[\s*]+{n}'
                 rf'\s*(?:[;=,)]|\[)', self.text) or re.search(
                 # 매크로 선언 VAR(uint8, AUTOMATIC) name; P2VAR(…) name — 쉼표가 있어 캐스트 (uint8)name 과 구별

@@ -400,6 +400,13 @@ def test_follow():
     assert ma.declared_var('s_secretSt') and not ma.declared_var('secretK') and 'secretIn' in ma.cols
     assert '상수 값 모름 (secretK)' in ma.manual[pa[0][0]], ma.manual
     assert 'secretLoc' in pa[3]['locals']['af']
+    # 쉼표로 여러 개 선언, 두 단어 형, 매크로 선언 여러 개 / 호출 인자·함수 원형·대입은 선언 아님
+    dn = bva.decl_names(bc.strip_code(
+        'static uint8 g_a = 0u, g_secB = 1u, g_arr[3];\nunsigned char g_c;\n'
+        'static VAR(uint8, VAR_NOINIT) s_x, s_y;\nint proto(int pa, int pb);\n'
+        'void f(void) { foo(x, SECRET_K2); y = z * w; return v; if (q) r = 1; }\n'))
+    assert {'g_a', 'g_secB', 'g_arr', 'g_c', 's_x', 's_y'} <= dn, dn
+    assert not dn & {'SECRET_K2', 'x', 'z', 'w', 'v', 'y', 'r', 'proto'}, dn
     a_path = os.path.join(root, 'secret_a.c')
     open(a_path, 'w', encoding='utf-8').write(a_src)
     buf = io.StringIO()
