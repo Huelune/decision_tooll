@@ -390,6 +390,12 @@ def test_follow():
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
     assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    # 헤더끼리 서로 참조하는 상수, 식으로 된 #define, 함수 꼴 매크로는 빼기
+    c = bva.constants(['enum { eX = BASE + 1, eY, eZ = LIM2 };\n',
+                       '#define LIM2 (BASE * 2)  /* x */\n#define BIT3 (1U << 3)\n#define SQ(x) ((x) * (x))\n'
+                       '#define BASE ((uint8)10)\n#define NAME "str"\n'])
+    assert (c['BASE'], c['LIM2'], c['BIT3'], c['eX'], c['eY'], c['eZ']) == (10, 20, 8, 11, 12, 20), c
+    assert 'SQ' not in c and 'NAME' not in c
     # --path: TC 하나의 예상 경로를 줄 번호·결과로만 (switch는 case 줄 번호)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

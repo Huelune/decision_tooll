@@ -203,26 +203,38 @@ def const_eval(expr, consts):
 
 
 def constants(srcs):
-    """#define 숫자와 enum 값."""
+    """#define 상수와 enum 값. #define 식((A + 1), (1 << 3), 캐스트)도 계산하고, 다른 헤더의 상수를 쓰는 것도
+    읽는 순서와 상관없이 값이 더 정해지지 않을 때까지 여러 번 돌려 채운다."""
     out = {'NULL': 0, 'TRUE': 1, 'FALSE': 0, 'true': 1, 'false': 0}
+    defs, enums = [], []
     for src in srcs:
-        for m in re.finditer(rf'^[ \t]*#[ \t]*define[ \t]+(\w+)[ \t]+\(?[ \t]*(-?)[ \t]*({NUM})[ \t]*\)?'
-                             r'[ \t]*(?://.*|/\*.*)?$', src, re.M):
-            try:
-                out[m.group(1)] = (-1 if m.group(2) else 1) * num(m.group(3))
-            except Manual:
-                pass
+        # 함수 꼴 매크로 FOO(x) 는 뺀다 (이름 바로 뒤가 '(')
+        for m in re.finditer(r'^[ \t]*#[ \t]*define[ \t]+(\w+)(?!\()[ \t]+([^\n]*?)[ \t]*(?://[^\n]*|/\*[^\n]*)?$',
+                             src, re.M):
+            if m.group(2).strip() and not m.group(2).rstrip().endswith('\\'):
+                defs.append((m.group(1), m.group(2)))
         for m in re.finditer(r'\benum\b[^{;]*\{([^}]*)\}', bc.strip_code(src)):
-            v = -1
-            for item in m.group(1).split(','):
-                name, _, expr = item.partition('=')
-                if not name.strip():
-                    continue
+            enums.append([item.partition('=') for item in m.group(1).split(',') if item.split('=')[0].strip()])
+    for _ in range(10):   # 값이 더 안 늘 때까지 (헤더끼리 서로 참조)
+        n = len(out)
+        for name, expr in defs:
+            if name not in out:
                 try:
-                    v = const_eval(expr, out) if expr.strip() else v + 1
+                    out[name] = const_eval(expr, out)
                 except Manual:
-                    break  # 값을 모르면 뒤 항목도 모른다
-                out[name.strip()] = v
+                    pass
+        for items in enums:
+            v = -1
+            for name, _, expr in items:
+                name = name.strip()
+                if name not in out:
+                    try:
+                        out[name] = const_eval(expr, out) if expr.strip() else v + 1
+                    except Manual:
+                        break  # 값을 모르면 뒤 항목도 모른다 (다음 바퀴에 다시)
+                v = out[name]
+        if len(out) == n:
+            break
     return out
 
 
