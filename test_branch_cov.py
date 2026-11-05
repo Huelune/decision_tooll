@@ -412,7 +412,15 @@ def test_follow():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert bc.main([a_path]) == 0
-    assert 'C 파일에 1번(그 조건)뿐 1개' in buf.getvalue() and 'secret' not in buf.getvalue().lower(), buf.getvalue()
+    assert '선언을 못 찾음 1개' in buf.getvalue() and 'secret' not in buf.getvalue().lower(), buf.getvalue()
+    # 선언은 못 찾아도 대입·&넘김·멤버 접근이 있으면 변수 (다른 모듈 전역), 근거 없으면 상수 값 모름
+    x_src = ('void init(void) { g_secDone = TRUE; Stub_Get(&g_secVal); }\n'
+             'int xf(void) { if (g_secDone == TRUE) { return 1; } if (g_secVal > 3) { return 2; }'
+             ' if (g_secSt.mode == 2) { return 3; } if (eSecMode == 1) { return 4; } return 0; }\n')
+    px = bc.parse(bc.strip_code(x_src))
+    mx = bva.Model(px, [x_src])
+    assert {'g_secDone', 'g_secVal', 'g_secSt.mode'} <= set(mx.cols), mx.cols
+    assert [w for w in mx.manual.values()] == ['상수 값 모름 (eSecMode)'], mx.manual
     # --inc 에 파일을 직접 줘도 (확장자 상관없이) 읽고, 읽은 개수를 화면에
     txt = os.path.join(root, 'secret_defs.txt')
     open(txt, 'w', encoding='utf-8').write('#define eSecretRun (4u)\n#define secret_bad (NOPE + 1)\n')

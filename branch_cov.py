@@ -21,6 +21,7 @@ import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
+VERSION = '2026-11-05.17'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
@@ -544,7 +545,7 @@ def render_screen(r, bva_lines=()):
     total = sum(len(d.outcomes()) for d in r['decs'])
     done = total - len(r['missing'])
     pct = 100.0 * done / total if total else 0.0
-    out = ['실행 전 분기 커버리지 (decision coverage 추정)', '-' * 60,
+    out = [f'실행 전 분기 커버리지 (decision coverage 추정)  도구 {VERSION}', '-' * 60,
            f"함수 {len(r['funcs'])}개  결정문 {len(r['decs'])}개  분기 결과 {total}개  채움 {done}개 ({pct:.1f}%)",
            f"TC {len(r['tcs'])}개  표기 줄 {r['lines']}개  코드와 맞춘 줄 {r['matched']}개", '']
     if not r['tcs']:   # TC가 없으면 못 채운 목록은 전부라 의미 없다 → 종류별 개수만
@@ -718,12 +719,14 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     unknown = sorted({n for w in manual.values() for n in re.findall(r'상수 값 모름 \((\w+)\)', w)})
     if unknown:   # 값을 모르는 상수는 사용자에게 받아야 한다 (이름은 상세 파일에만)
         lines.append(f'  값을 모르는 상수 {len(unknown)}개 — 정의된 헤더 폴더를 --inc 폴더 로 주세요 (이름은 상세 파일)')
-        c_text = strip_code(srcs[0])   # 어디에 나오는지 개수만: 원인 찾기용
-        in_h = sum(any(re.search(rf'\b{n}\b', h) for h in srcs[1:]) for n in unknown)
-        many = sum(len(re.findall(rf'\b{n}\b', c_text)) >= 2 for n in unknown if
-                   not any(re.search(rf'\b{n}\b', h) for h in srcs[1:]))
-        lines.append(f'    어디에 나오나: 읽은 헤더에 있음 {in_h}개 · C 파일에서 2번 이상 {many}개'
-                     f' · C 파일에 1번(그 조건)뿐 {len(unknown) - in_h - many}개')
+        # 종류별 개수만 (원인 찾기용): 읽은 코드의 enum 안 / #define / 어디에도 선언 없음
+        bodies = [b for s_ in srcs for b in re.findall(r'\benum\b[^{;]*\{([^}]*)\}', strip_code(s_))]
+        in_enum = {n for n in unknown if any(re.search(rf'\b{n}\b', b) for b in bodies)}
+        in_def = {n for n in unknown if n not in in_enum and
+                  any(re.search(rf'^[ \t]*#[ \t]*define[ \t]+{n}\b', s_, re.M) for s_ in srcs)}
+        lines.append(f'    종류: enum 항목인데 값 못 구함 {len(in_enum)}개 · #define인데 값 못 구함 {len(in_def)}개'
+                     f' · 선언을 못 찾음 {len(unknown) - len(in_enum) - len(in_def)}개'
+                     ' (다른 모듈 전역 변수나 읽지 않은 헤더의 enum)')
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
         lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
                      'o 찾음 x 없음 상 상한 시 시간')

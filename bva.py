@@ -413,6 +413,7 @@ class Model:
         self.fixed, self.float_hint = {}, set()   # 결정문 -> 고정값 stub 이름들 / float stub 반환 변수
         text = self.text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
         self.isvar, self.declnames = {}, decl_names(text)
+        self.setnames = {re.match(r'\w+', k).group() for k in self.info['set']}   # 파일 어디서든 대입되는 이름
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
@@ -623,7 +624,9 @@ class Model:
         """읽은 코드·헤더 어딘가에 `형 [*]name;`·`= …`·`[`·`,`·`)` 꼴로 변수로 선언됐는가."""
         if name not in self.isvar:
             n = re.escape(name)
-            self.isvar[name] = name in self.declnames or bool(re.search(
+            self.isvar[name] = name in self.declnames or name in self.setnames or bool(re.search(
+                # 상수에는 없는 쓰임: f(&이름), 이름.x, 이름->x, 이름[i]
+                rf'[(,=]\s*&\s*{n}\b|\b{n}\s*(?:\.|->|\[)', self.text)) or bool(re.search(
                 rf'\b(?!(?:return|case|goto|else|sizeof|if|while|switch)\b)[A-Za-z_]\w*[\s*]+{n}'
                 rf'\s*(?:[;=,)]|\[)', self.text) or re.search(
                 # 매크로 선언 VAR(uint8, AUTOMATIC) name; P2VAR(…) name — 쉼표가 있어 캐스트 (uint8)name 과 구별
