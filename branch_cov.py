@@ -1,7 +1,7 @@
 """실행 전 분기 커버리지 추정기 (C, decision coverage).
 
 사용: python branch_cov.py <C 파일> [TC 표기 파일] [--func 함수이름] [--csv 경계값TC.csv]
-                          [--stub stub코드.c] [--stub-free]
+                          [--stub stub코드.c] [--stub-free] [--time 초]
 
 TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형식
 (if / else if / elseif / else / case / default / while / for).
@@ -602,6 +602,7 @@ def main(argv=None):
     ap.add_argument('--csv', help='경계값 TC 입력값을 이 CSV로 저장 (TC 표기는 상세 파일에)')
     ap.add_argument('--stub', help='직접 쓴 stub 코드 파일 (반환식을 계산에 씀)')
     ap.add_argument('--stub-free', action='store_true', help='정의 안 한 stub 반환값을 0 대신 자유 입력으로')
+    ap.add_argument('--time', type=float, default=60, help='경계값 TC 계산 시간 한도(초), 기본 60')
     a = ap.parse_args(argv)
     os.system('cls' if os.name == 'nt' else 'clear')  # 고정 문자열이라 주입 위험 없음
     rpt = os.path.join(tempfile.gettempdir(), REPORT)
@@ -624,7 +625,7 @@ def main(argv=None):
         parsed = parse(strip_code(src), a.func)
         r = analyze('', tc_text, parsed=parsed)
         # TC 표기 파일이 없으면 경계값 TC로 얼마나 채울 수 있는지 보여 준다 (CSV는 --csv 줄 때만)
-        extra = (make_bva(parsed, [src] + headers_near(a.c_file), a.csv, stub_src, not a.stub_free)
+        extra = (make_bva(parsed, [src] + headers_near(a.c_file), a.csv, stub_src, not a.stub_free, a.time)
                  if a.csv or not a.tc_file else None)
     except LookupError:
         print('오류: --func 로 준 함수를 C 파일에서 못 찾음 — 함수 이름을 확인하세요')
@@ -655,13 +656,13 @@ def headers_near(c_path):
     return out
 
 
-def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True):
+def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60):
     """경계값 TC를 만들고 csv_path가 있으면 CSV로 쓴다 → (화면 요약 줄들, 상세 보고서에 붙일 글).
     화면에는 개수·줄 번호·이유 종류만 찍는다 (이유 원문에는 변수·상수 이름이 들어 있다)."""
     import bva
     t0 = time.monotonic()
     try:
-        m = bva.Model(parsed, srcs, stub_src, stub_zero)
+        m = bva.Model(parsed, srcs, stub_src, stub_zero, budget)
         tcs, manual = m.generate()
     except Exception:
         return ['경계값 TC: 계산 실패 — 상세 파일의 오류를 확인하세요'], \

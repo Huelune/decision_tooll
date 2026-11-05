@@ -47,7 +47,7 @@ BIN = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b
 UNARY = {'!': lambda x: int(not x), '~': lambda x: ~x, '-': lambda x: -x, '+': lambda x: x}
 LOOPS = ('while', 'for', 'dowhile')
 LIMIT = 3000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
-BUDGET = 60    # ponytail: 경계값 계산 전체 시간 한도(초). 넘으면 남은 분기는 '시간 초과' 수동
+BUDGET = 60    # ponytail: 경계값 계산 전체 시간 한도(초) 기본값. 넘으면 남은 분기는 '시간 초과' 수동
 
 
 class Manual(Exception):
@@ -314,7 +314,8 @@ def skeleton(names, srcs, stub_src=''):
 
 
 class Model:
-    def __init__(self, parsed, srcs, stub_src='', stub_zero=True):
+    def __init__(self, parsed, srcs, stub_src='', stub_zero=True, budget=BUDGET):
+        self.budget = budget
         self.decs = sorted(parsed[0], key=lambda d: d.pos)
         self.info = parsed[3]
         self.consts = constants(srcs + [stub_src])
@@ -324,8 +325,9 @@ class Model:
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
-        self.own, self.leaf, self.deadline = {}, set(), float('inf')
-        self.plain, self.stop = set(), None   # plain: 경계는 못 맞추고 일반 값으로 채우는 분기   # own: 경계 검사에서 움직일 변수
+        self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
+        # plain: 경계는 못 맞추고 일반 값으로 채우는 분기, alone: 분기 하나만 채우는 값
+        self.plain, self.stop, self.alone = set(), None, {}
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
@@ -434,7 +436,7 @@ class Model:
 
     def why_not(self, t, stop=None):
         if stop == 'time':
-            return f'계산 시간 한도({BUDGET}초)를 넘김'
+            return f'계산 시간 한도({self.budget:g}초)를 넘김'
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
         hint = (f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
                 if names else '')
@@ -480,20 +482,26 @@ class Model:
                     return True
         return False
 
-    def solve(self, req, bnd, limit=LIMIT):
+    def solve(self, req, bnd, limit=LIMIT, focus=False):
         """req {결정문: 결과}를 모두 만족하고 bnd 분기는 경계에 있는 값. 못 찾으면 None.
+        focus: 경로 조건에 직접 쓰인 변수만 바꾸고 나머지(앞 분기에서 값을 바꾸는 쪽)는 0으로 둔다.
         못 찾은 까닭은 self.stop: 'limit'(탐색 상한) / 'time'(시간 한도) / None(후보를 다 봄)."""
         V, nodes, self.stop = Defaults(), [0], None
-        if any(not self.vars[d] and self.outcome(d, V) != o for d, o in req.items()):
+        if time.monotonic() > self.deadline:   # 시간이 다 됐으면 시작도 안 한다
+            self.stop = 'time'
             return None
-        order = [v for d in sorted(req, key=lambda d: d.pos) for v in self.vars[d]]
-        order = list(dict.fromkeys(order))
-        checks = [(d, o) for d, o in req.items() if self.vars[d]]
+        keep = {v for d in req for v in self.own[d]} if focus else None
+        need = {d: [x for x in self.vars[d] if keep is None or x in keep] for d in req}
+        for d, o in req.items():   # 바꿀 변수가 없는 결정문은 지금 값(0)으로 바로 판정
+            if not need[d] and (self.outcome(d, V) != o or ((d, o) in bnd and not self.boundary(d, o, V))):
+                return None
+        order = list(dict.fromkeys(v for d in sorted(req, key=lambda d: d.pos) for v in need[d]))
+        checks = [(d, o) for d, o in req.items() if need[d]]
 
         def ok(v):
             memo = {}   # 같은 V에서 앞 분기 결과를 한 번만 계산
             for d, o in checks:
-                if v in self.vars[d] and all(x in V for x in self.vars[d]):
+                if v in need[d] and all(x in V for x in need[d]):
                     if self.outcome(d, V, memo) != o or ((d, o) in bnd and not self.boundary(d, o, V)):
                         return False
             return True
@@ -518,6 +526,24 @@ class Model:
 
         return dict(V) if go(0) else None
 
+    def solve_alone(self, t, limit=LIMIT):
+        """분기 t 하나만 채우는 값. 앞 분기는 안 타는 쪽(0)으로 두고 경로 조건 변수만 바꾸는 빠른 탐색부터,
+        경계 바로 옆 값 → 경계 아닌 값 순서로. 못 찾으면 None, 까닭은 self.stop."""
+        req, stops = dict(bc.need(*t)), set()
+        for bnd in ([] if t in self.plain else [{t}]) + [set()]:
+            for focus in (True, False):
+                V = self.solve(req, bnd, limit, focus)
+                if V is not None:
+                    if not bnd:
+                        self.plain.add(t)   # 갈 수는 있는데 경계 바로 옆 값은 못 찾음 → 일반 값으로 채운다
+                    return V
+                if self.stop == 'time':
+                    return None
+                if not focus:
+                    stops.add(self.stop)   # 빠른 탐색이 못 찾은 건 못 가는 증거가 아니다
+        self.stop = 'limit' if 'limit' in stops else None
+        return None
+
     def run(self, V):
         """값 V로 지나는 결정문과 결과. 결과를 모르면 None (그 아래는 안 따라감)."""
         V, res, memo = Defaults(V), {}, {}
@@ -528,7 +554,10 @@ class Model:
 
     def generate(self):
         """→ (TC 목록 [(값, 지나는 결과, 경계로 채운 분기)], 수동 {분기: 이유})
-        묶는 순서에 따라 TC 수가 달라서, 코드 순서와 경로가 긴 것부터 두 가지로 해 보고 적은 쪽을 쓴다."""
+        1) 분기마다 혼자 채우는 값을 먼저 찾아 둔다 (못 가는 분기는 여기서 거른다).
+        2) 되도록 여러 분기를 한 TC에 묶는다. 묶음 순서에 따라 TC 수가 달라서 코드 순서와 경로가 긴 것부터
+           두 가지로 해 보고 적은 쪽을 쓴다. 못 묶은 분기도 1)의 값으로 TC를 만든다.
+        3) 상한에 걸린 분기는 남은 시간에 상한을 크게 해서 다시 찾는다."""
         targets = [(d, o) for d in self.decs for o in d.outcomes()]
         manual = {}
         for t in targets:
@@ -536,44 +565,45 @@ class Model:
             if bad:
                 manual[t] = f'L{bad.line} {self.manual[bad]}'
         todo = [t for t in targets if t not in manual]
-        self.deadline, runs, self.plain = time.monotonic() + BUDGET, [], set()
-        for t in todo:   # 하나씩 먼저 풀어 본다: 혼자서도 못 가는 분기는 묶을 때마다 다시 찾지 않게 뺀다
-            req = dict(bc.need(*t))
-            if self.solve(req, {t}) is not None:
-                continue
-            stop = self.stop
-            if stop != 'time' and self.solve(req, set()) is not None:
-                self.plain.add(t)   # 갈 수는 있는데 경계 바로 옆 값은 못 찾음 → 일반 값으로 채운다
-                continue
-            if stop == 'time' or self.stop != 'limit':   # 상한에 걸린 건 묶을 때 다른 값 순서로 다시 해 본다
-                manual[t] = self.why_not(t, 'time' if stop == 'time' else self.stop)
+        self.deadline, runs, self.plain, self.alone = time.monotonic() + self.budget, [], set(), {}
+        for t in todo:
+            V = self.solve_alone(t)
+            if V is not None:
+                self.alone[t] = V
+            elif self.stop is None:   # 후보를 다 봐도 없음
+                manual[t] = self.why_not(t)
+            # 상한·시간에 걸린 건 묶음과 3)에서 다시 해 본다
         todo = [t for t in todo if t not in manual]
         deep = sorted(todo, key=lambda t: -len(bc.need(*t)))
-        for order in (todo, deep):   # 두 번째 순서는 남은 시간만 쓴다 (못 끝내면 수동이 많아 안 뽑힌다)
+        for order in (todo, deep):
             runs.append(self.greedy(order, dict(manual)))
         tcs, manual = min(runs, key=lambda r: (len(r[1]), len(r[0])))   # 수동이 적은 쪽, 그다음 TC가 적은 쪽
-        for t in sorted(manual, key=lambda t: t[0].pos):   # 상한에 걸린 분기는 남은 시간에 상한을 크게 해서 하나씩
+        for t in sorted(manual, key=lambda t: t[0].pos):
             if t in manual and '탐색 상한' in manual[t] and not self.retry(t, tcs, manual):
                 if self.stop == 'time':
                     break
+        if time.monotonic() > self.deadline:   # 시간이 모자라 다시 찾지 못한 것은 시간 초과로 알린다
+            for t, why in manual.items():
+                manual[t] = why.replace('값 조합이 많아 탐색 상한에 걸림',
+                                        f'값 조합이 많고 계산 시간 한도({self.budget:g}초) 안에 못 찾음')
         self.deadline = float('inf')
         return tcs, manual
 
-    def retry(self, t, tcs, manual):
-        """t 하나만 큰 상한으로 다시 푼다. 찾으면 TC를 더하고 그 TC가 채우는 수동 분기를 뺀다."""
-        req = dict(bc.need(*t))
-        V = None if t in self.plain else self.solve(req, {t}, LIMIT * 100)
-        if V is None and self.stop != 'time':
-            V = self.solve(req, set(), LIMIT * 100)
-            if V is not None:
-                self.plain.add(t)
-        if V is None:
-            return False
+    def cover(self, V, todo):
+        """값 V로 todo 중 실제로 채우는 분기 → (전체 값, 지나는 결과, 채운 분기)."""
         full = {v: V.get(v, 0) for v in self.cols}
         res = self.run(full)
-        got = {u for u in manual if res.get(u[0]) == u[1] and
+        got = {u for u in todo if res.get(u[0]) == u[1] and
                (u in self.plain or self.boundary(*u, Defaults(full)))}
-        got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in manual}
+        got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in todo}
+        return full, res, got
+
+    def retry(self, t, tcs, manual):
+        """t 하나만 큰 상한으로 다시 푼다. 찾으면 TC를 더하고 그 TC가 채우는 수동 분기를 뺀다."""
+        V = self.solve_alone(t, LIMIT * 100)
+        if V is None:
+            return False
+        full, res, got = self.cover(V, manual)
         if t not in got:
             return False
         tcs.append((full, res, got))
@@ -584,29 +614,27 @@ class Model:
     def greedy(self, todo, manual):
         tcs = []
         while todo:
-            req, bnd, V = {}, set(), None
-            picked = set()
+            req, bnd, V, picked = {}, set(), None, set()
             for t in todo:   # 앞 분기와 같이 갈 수 있으면 같은 TC에 묶는다
                 r2 = dict(req)
                 if any(r2.setdefault(pd, po) != po for pd, po in bc.need(*t)):
                     continue
                 b2 = bnd if t in self.plain else bnd | {t}
-                # 혼자서는 풀리는 분기라 묶음 실패는 대개 값 충돌 → 짧게 찾고 다음 TC로 넘긴다
-                V2 = self.solve(r2, b2, LIMIT if V is None else LIMIT // 3)
+                if V is None and t in self.alone:   # 첫 분기는 혼자 찾아 둔 값 그대로
+                    V2 = self.alone[t]
+                elif V is None or time.monotonic() <= self.deadline:
+                    # 묶을 때는 경로 조건 변수만 짧게 찾는다 (앞 분기는 안 타는 쪽). 못 묶으면 다음 TC에서 혼자
+                    V2 = self.solve(r2, b2, LIMIT if V is None else LIMIT // 3, focus=V is not None)
+                else:
+                    continue   # 시간이 다 되면 더 묶지 않는다
                 if V2 is not None:
                     req, bnd, V = r2, b2, V2
                     picked.add(t)
-            if time.monotonic() > self.deadline:
-                manual.update((t, f'계산 시간 한도({BUDGET}초)를 넘김') for t in todo)
-                break
             if V is None:
-                manual.update((t, self.why_not(t, self.stop)) for t in todo)
+                stop = 'time' if time.monotonic() > self.deadline else self.stop
+                manual.update((t, self.why_not(t, stop)) for t in todo)
                 break
-            full = {v: V.get(v, 0) for v in self.cols}
-            res = self.run(full)
-            got = {t for t in todo if res.get(t[0]) == t[1] and
-                   (t in self.plain or self.boundary(*t, Defaults(full)))}
-            got |= {(d, 'F') for d, o in got if o == 'T' and d.kind in LOOPS and (d, 'F') in todo}
+            full, res, got = self.cover(V, todo)
             manual.update((t, '값은 찾았지만 실제 경로가 달라짐 (확인 필요)') for t in picked - got)
             tcs.append((full, res, got))
             todo = [t for t in todo if t not in got and t not in picked]
