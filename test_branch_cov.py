@@ -316,6 +316,20 @@ def test_follow():
     tcs, manual = bva.Model(p, [F_SRC]).generate()
     assert 'Stub_A()' in manual[(d[11], 'T')] and 'Stub_B()' in manual[(d[11], 'T')], manual
 
+    # TC 없이 명령줄: 결정문 종류와 경계값 요약을 이유 종류로만 찍는다 (이름이 화면에 안 나온다)
+    import tempfile
+    src = (F_SRC.replace('sum', 'secret_sum').replace('Stub_', 'Secret_stub_')
+           .replace('(v > 100)', '(v > SECRET_LIMIT)'))
+    c_path = os.path.join(tempfile.mkdtemp(), 'secret_mod.c')
+    open(c_path, 'w', encoding='utf-8').write(src)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path]) == 0
+    out = buf.getvalue()
+    assert 'secret' not in out.lower() and '결정문 종류' in out and '못 채운 분기' not in out, out
+    assert '상수 값 모름' in out and '고정 stub이 막음' in out, out   # 상수를 모르는 L11이 return이라 뒤도 막힘
+    assert len(out.splitlines()) <= 40
+
 
 def test_gui():
     import tkinter as tk

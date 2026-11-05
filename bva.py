@@ -10,6 +10,7 @@ stub에 &로 넘긴 값은 stub이 바꾸지 않는 것으로 본다.
 import bisect
 import csv
 import re
+import time
 
 import branch_cov as bc
 
@@ -45,11 +46,25 @@ BIN = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b
        '<<': lambda a, b: a << _shift(b), '>>': lambda a, b: a >> _shift(b)}
 UNARY = {'!': lambda x: int(not x), '~': lambda x: ~x, '-': lambda x: -x, '+': lambda x: x}
 LOOPS = ('while', 'for', 'dowhile')
-LIMIT = 20000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
+LIMIT = 3000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
+BUDGET = 60    # ponytail: 경계값 계산 전체 시간 한도(초). 넘으면 남은 분기는 '시간 초과' 수동
 
 
 class Manual(Exception):
     """자동으로 값을 못 정하는 조건. 메시지가 이유."""
+
+
+# 수동 이유 원문(이름이 들어 있음) → 화면에 찍을 종류. 앞에 있는 것부터 본다
+REASONS = [('고정 stub', '고정 stub이 막음'), ('경계값을 못 찾음', '경계값 못 찾음'),
+           ('실제 경로가 달라짐', '값과 경로가 안 맞음'), ('반복문 안에서 대입', '반복문 안에서 대입'),
+           ('식 안에서 대입', '조건식 안에서 대입'), ('구조체 통째로', '구조체 통째로 대입'),
+           ('결과에 따라 달라짐', '수동 분기 뒤의 대입'), ('상수 값 모름', '상수 값 모름'),
+           ('sizeof', 'sizeof 식'), ('잘못된 숫자', '잘못된 숫자'), ('상수 식', '상수 식 계산 실패'),
+           ('못 다루는', '못 다루는 식'), ('괄호 짝', '못 다루는 식'), ('시간 한도', '계산 시간 초과')]
+
+
+def reason_kind(why):
+    return next((k for p, k in REASONS if p in why), '기타')
 
 
 class Defaults(dict):
@@ -308,14 +323,16 @@ class Model:
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
+        self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
             try:
-                self.via = False
+                self.via, self.leaf = False, set()
                 f, vs, nums = translate(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
                 if self.via:   # 대입을 거친 값: 조건 숫자 ± 대입 식 숫자도 경계 후보로 (v = a + 5; v > 100 → a 95)
                     cn = translate(d.cond, self.consts, lambda t, call: _fixed(0))[2]
+                    nums = list(dict.fromkeys(nums))
                     nums = nums + [n + k * m for n in cn for m in nums for k in (1, -1)]
                 if d.kind == 'switch':
                     self.labels[d] = {lab: const_eval(lab[5:], self.consts) for lab, _ in d.labels if lab != 'default'}
@@ -324,6 +341,8 @@ class Model:
                 self.manual[d] = str(e)
                 continue
             self.fn[d], self.vars[d] = f, vs
+            # 조건 값에 직접 들어가는 변수만 (앞 분기 결과를 정하는 변수는 빼서 경계 검사를 가볍게)
+            self.own[d] = [v for v in vs if v in self.leaf]
             flt = any(isinstance(n, float) for n in nums)
             for v in vs:
                 if v not in self.cols:
@@ -345,6 +364,7 @@ class Model:
         if not call:
             return self.value(t, d.pos if pos is None else pos, d)
         r = self.stubs.ref(t)
+        self.leaf.update(r[1])
         if not r[1]:
             self.fixed.setdefault(d, set()).add(t)
         if re.search(rf'\b{FLOAT_T}', self.stubs.rtype.get(t, '')):
@@ -363,6 +383,7 @@ class Model:
         if not hits:
             if base in self.info['locals'].get(d.func, ()) and base not in self.info['params'].get(d.func, ()):
                 return _fixed(0)   # ponytail: 대입 전 지역 변수는 0으로 본다 (모든 갈래에서 대입하면 안 쓰임)
+            self.leaf.add(t)
             return _var(t)
         self.via = True
         h, p = hits[-1]
@@ -399,7 +420,7 @@ class Model:
                 f = (lambda a, b, cs: lambda V, R: a(V, R) if all(R(i) in os for i, os in cs) else b(V, R))(
                     f, pf, conds)
                 vs, ns = vs + dep + pvs, ns + pns
-        out = f, list(dict.fromkeys(vs)), ns
+        out = f, list(dict.fromkeys(vs)), list(dict.fromkeys(ns))   # 앞 값의 숫자가 겹쳐 쌓이지 않게
         self.vmemo[key] = out
         return out
 
@@ -443,9 +464,9 @@ class Model:
 
     def boundary(self, d, o, V):
         """한 변수를 경계 한 칸 움직이면 결과가 바뀌는가 (= 경계 바로 옆 값인가)."""
-        if d.kind == 'switch' or not self.vars[d]:   # 움직일 값이 없으면(고정 stub 등) 그대로 인정
+        if d.kind == 'switch' or not self.own[d]:   # 움직일 값이 없으면(고정 stub 등) 그대로 인정
             return True
-        for v in self.vars[d]:
+        for v in self.own[d]:
             for x in (V[v] + self.step(v), V[v] - self.step(v)):
                 if self.uns[v] and x < 0:
                     continue
@@ -463,9 +484,10 @@ class Model:
         checks = [(d, o) for d, o in req.items() if self.vars[d]]
 
         def ok(v):
+            memo = {}   # 같은 V에서 앞 분기 결과를 한 번만 계산
             for d, o in checks:
                 if v in self.vars[d] and all(x in V for x in self.vars[d]):
-                    if self.outcome(d, V) != o or ((d, o) in bnd and not self.boundary(d, o, V)):
+                    if self.outcome(d, V, memo) != o or ((d, o) in bnd and not self.boundary(d, o, V)):
                         return False
             return True
 
@@ -475,7 +497,7 @@ class Model:
             v = order[i]
             for x in self.cands[v]:
                 nodes[0] += 1
-                if nodes[0] > LIMIT:
+                if nodes[0] > LIMIT or (nodes[0] % 64 == 0 and time.monotonic() > self.deadline):
                     break
                 V[v] = x
                 if ok(v) and go(i + 1):
@@ -504,7 +526,10 @@ class Model:
                 manual[t] = f'L{bad.line} {self.manual[bad]}'
         todo = [t for t in targets if t not in manual]
         deep = sorted(todo, key=lambda t: -len(bc.need(*t)))
-        runs = [self.greedy(order, dict(manual)) for order in (todo, deep)]
+        self.deadline, runs = time.monotonic() + BUDGET, []
+        for order in (todo, deep):   # 두 번째 순서는 남은 시간만 쓴다 (못 끝내면 수동이 많아 안 뽑힌다)
+            runs.append(self.greedy(order, dict(manual)))
+        self.deadline = float('inf')
         return min(runs, key=lambda r: (len(r[1]), len(r[0])))   # 수동이 적은 쪽, 그다음 TC가 적은 쪽
 
     def greedy(self, todo, manual):
@@ -518,6 +543,9 @@ class Model:
                 V2 = self.solve(r2, bnd | {t})
                 if V2 is not None:
                     req, bnd, V = r2, bnd | {t}, V2
+            if time.monotonic() > self.deadline:
+                manual.update((t, f'계산 시간 한도({BUDGET}초)를 넘김') for t in todo)
+                break
             if V is None:
                 manual.update((t, self.why_not(t)) for t in todo)
                 break

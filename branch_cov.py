@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
@@ -534,24 +535,34 @@ def howto(d, o, info, stubs=None):
     return out
 
 
-def render_screen(r):
+def render_screen(r, bva_lines=()):
+    """bva_lines: 경계값 TC 요약 줄들 (있으면 목록을 줄여 한 화면에 맞춘다)."""
     total = sum(len(d.outcomes()) for d in r['decs'])
     done = total - len(r['missing'])
     pct = 100.0 * done / total if total else 0.0
     out = ['실행 전 분기 커버리지 (decision coverage 추정)', '-' * 60,
            f"함수 {len(r['funcs'])}개  결정문 {len(r['decs'])}개  분기 결과 {total}개  채움 {done}개 ({pct:.1f}%)",
            f"TC {len(r['tcs'])}개  표기 줄 {r['lines']}개  코드와 맞춘 줄 {r['matched']}개", '']
-    miss = r['missing']
-    out.append(f'못 채운 분기 {len(miss)}개' + ('  (L=줄 번호)' if miss else ''))
-    for ln, d, o in miss[:18]:
-        out.append(f'  L{ln:<6} {_kind(d, o):<8} {"" if d.kind == "switch" else o}')
-    if len(miss) > 18:
-        out.append(f'  … 외 {len(miss) - 18}개는 상세 파일')
-    out += ['', f"경고 {len(r['warns'])}개"]
-    for n, dno, msg, _ in r['warns'][:8]:
-        out.append(f'  TC{n:<3} D{dno:<3} {msg}')
-    if len(r['warns']) > 8:
-        out.append(f"  … 외 {len(r['warns']) - 8}개는 상세 파일")
+    if not r['tcs']:   # TC가 없으면 못 채운 목록은 전부라 의미 없다 → 종류별 개수만
+        kinds = {}
+        for d in r['decs']:
+            kinds[d.kind] = kinds.get(d.kind, 0) + 1
+        out.append('결정문 종류  ' + '  '.join(f'{k} {n}개' for k, n in kinds.items()))
+    else:
+        miss, cap = r['missing'], (10 if bva_lines else 18)
+        out.append(f'못 채운 분기 {len(miss)}개' + ('  (L=줄 번호)' if miss else ''))
+        for ln, d, o in miss[:cap]:
+            out.append(f'  L{ln:<6} {_kind(d, o):<8} {"" if d.kind == "switch" else o}')
+        if len(miss) > cap:
+            out.append(f'  … 외 {len(miss) - cap}개는 상세 파일')
+        cap = 5 if bva_lines else 8
+        out += ['', f"경고 {len(r['warns'])}개"]
+        for n, dno, msg, _ in r['warns'][:cap]:
+            out.append(f'  TC{n:<3} D{dno:<3} {msg}')
+        if len(r['warns']) > cap:
+            out.append(f"  … 외 {len(r['warns']) - cap}개는 상세 파일")
+    if bva_lines:
+        out += [''] + list(bva_lines)
     out += ['', f'상세(조건문 포함, 밖으로 보내지 말 것): %TEMP%\\{REPORT}']
     return '\n'.join(out)
 
@@ -612,8 +623,9 @@ def main(argv=None):
     try:
         parsed = parse(strip_code(src), a.func)
         r = analyze('', tc_text, parsed=parsed)
+        # TC 표기 파일이 없으면 경계값 TC로 얼마나 채울 수 있는지 보여 준다 (CSV는 --csv 줄 때만)
         extra = (make_bva(parsed, [src] + headers_near(a.c_file), a.csv, stub_src, not a.stub_free)
-                 if a.csv else None)
+                 if a.csv or not a.tc_file else None)
     except LookupError:
         print('오류: --func 로 준 함수를 C 파일에서 못 찾음 — 함수 이름을 확인하세요')
         return 1
@@ -627,10 +639,8 @@ def main(argv=None):
         print(f'상세: %TEMP%\\{REPORT}')
         return 1
     with open(rpt, 'w', encoding='utf-8') as f:
-        f.write(render_report(r) + (extra[2] if extra else ''))
-    print(render_screen(r))
-    if extra:
-        print(f'경계값 TC {extra[0]}개 → CSV 저장 / 자동으로 못 만든 분기 {extra[1]}개 (이유와 TC 표기는 상세 파일)')
+        f.write(render_report(r) + (extra[1] if extra else ''))
+    print(render_screen(r, extra[0] if extra else ()))
     return 0
 
 
@@ -646,14 +656,33 @@ def headers_near(c_path):
 
 
 def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True):
-    """경계값 TC를 만들어 CSV로 쓴다 → (TC 수, 수동 분기 수, 상세 보고서에 붙일 글)."""
+    """경계값 TC를 만들고 csv_path가 있으면 CSV로 쓴다 → (화면 요약 줄들, 상세 보고서에 붙일 글).
+    화면에는 개수·줄 번호·이유 종류만 찍는다 (이유 원문에는 변수·상수 이름이 들어 있다)."""
     import bva
-    m = bva.Model(parsed, srcs, stub_src, stub_zero)
-    tcs, manual = m.generate()
-    m.write_csv(csv_path, tcs)
+    t0 = time.monotonic()
+    try:
+        m = bva.Model(parsed, srcs, stub_src, stub_zero)
+        tcs, manual = m.generate()
+    except Exception:
+        return ['경계값 TC: 계산 실패 — 상세 파일의 오류를 확인하세요'], \
+            '\n# 경계값 TC 계산 실패\n' + traceback.format_exc()
+    if csv_path:
+        m.write_csv(csv_path, tcs)
+    total = sum(len(d.outcomes()) for d in parsed[0])
+    got = len(set().union(set(), *(g for _, _, g in tcs)))
+    lines = [f"경계값 TC {len(tcs)}개로 {got}/{total} 채움 ({time.monotonic() - t0:.0f}초)" +
+             (' → CSV 저장' if csv_path else '  (CSV·TC 표기가 필요하면 --csv 파일이름.csv)'),
+             f'자동으로 못 만든 분기 {len(manual)}개' + ('  (이유 종류별, L=줄 번호)' if manual else '')]
+    kinds = {}
+    for (d, o), why in manual.items():
+        kinds.setdefault(bva.reason_kind(why), []).append(d.line_of(o))
+    for k, lns in sorted(kinds.items(), key=lambda kv: -len(kv[1])):
+        ls = sorted(set(lns))
+        lines.append(f'  {k:<20} {len(lns):>3}개  ' + ' '.join(f'L{x}' for x in ls[:8]) +
+                     (' …' if len(ls) > 8 else ''))
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
     text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
-    return len(tcs), len(manual), '\n'.join(text) + '\n'
+    return lines, '\n'.join(text) + '\n'
 
 
 def utf8_output():
