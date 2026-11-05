@@ -373,6 +373,7 @@ class Model:
         self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
         # plain: 경계는 못 맞추고 일반 값으로 채우는 분기, alone: 분기 하나만 채우는 값
         self.plain, self.stop, self.alone, self.trace = set(), None, {}, {}
+        self.dnums, self.ccache, self.parts = {}, {}, {}   # parts: 결정문 -> ('&&' 또는 '||', 조각 값 함수들)   # 결정문 -> 조건 숫자, (변수, 경로 결정문들) -> 후보
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
@@ -400,7 +401,8 @@ class Model:
             except Manual as e:
                 self.manual[d] = str(e)
                 continue
-            self.fn[d], self.vars[d] = f, vs
+            self.fn[d], self.vars[d], self.dnums[d] = f, vs, nums
+            self.parts[d] = self.split(d)
             # 조건 값에 직접 들어가는 변수만 (앞 분기 결과를 정하는 변수는 빼서 경계 검사를 가볍게)
             self.own[d] = [v for v in vs if v in self.leaf]
             flt = any(isinstance(n, float) for n in nums)
@@ -411,14 +413,46 @@ class Model:
                     (flt or v in self.float_hint) and not self.declared(v, INT_T, text))   # 형을 모르면 소수점 숫자·stub 형으로
                 self.uns[v] = self.uns.get(v, False) or self.declared(v, UNSIGNED_T, text)
                 self.cands.setdefault(v, set()).update(nums)
-        for v, ns in self.cands.items():   # 숫자마다 경계 양쪽
-            s = self.step(v)
-            vals = {0, 1} | {round(n + k * s, 6) for n in ns for k in (-1, 0, 1)}
-            if self.uns[v]:
-                vals = {x for x in vals if x >= 0}
-            if not self.isf[v]:
-                vals = {int(x) for x in vals}
-            self.cands[v] = sorted(vals, key=lambda x: (x < 0, abs(x)))   # 0 이상 작은 값부터
+        for v, ns in self.cands.items():
+            self.cands[v] = self.expand(v, ns)
+
+    def split(self, d):
+        """조건을 맨 바깥 || (없으면 &&)로 나눈 조각들. 조각 하나씩 맞춰 가는 탐색(climb)에 쓴다."""
+        c = bc.norm(d.cond)
+        for op in ('||', '&&'):
+            pieces, dep, last, i = [], 0, 0, 0
+            while i < len(c):
+                dep += (c[i] == '(') - (c[i] == ')')
+                if dep == 0 and c.startswith(op, i):
+                    pieces.append(c[last:i])
+                    last = i = i + 2
+                    continue
+                i += 1
+            if pieces:
+                try:
+                    fs = [translate(x, self.consts, lambda t, call: self.var_of(t, call, d))[0]
+                          for x in pieces + [c[last:]]]
+                except Manual:
+                    return None
+                return op, fs
+        return None
+
+    def expand(self, v, ns):
+        """숫자마다 경계 양쪽 (정수 ±1, float ±0.1), 0 이상 작은 값부터."""
+        s = self.step(v)
+        vals = {0, 1} | {round(n + k * s, 6) for n in ns for k in (-1, 0, 1)}
+        if self.uns[v]:
+            vals = {x for x in vals if x >= 0}
+        if not self.isf[v]:
+            vals = {int(x) for x in vals}
+        return sorted(vals, key=lambda x: (x < 0, abs(x)))
+
+    def cands_for(self, v, req):
+        """req 경로의 조건에 나온 숫자로만 만든 v의 후보 (다른 분기 숫자는 섞지 않는다)."""
+        ds = frozenset(d for d in req if v in self.vars.get(d, ()))
+        if (v, ds) not in self.ccache:
+            self.ccache[(v, ds)] = self.expand(v, {n for d in ds for n in self.dnums[d]}) if ds else self.cands[v]
+        return self.ccache[(v, ds)]
 
     def var_of(self, t, call, d, pos=None, depth=0):
         if not call:
@@ -522,8 +556,8 @@ class Model:
         own = {v for pd, _ in path for v in self.own.get(pd, ())}
         fixed = {n for pd, _ in path for n in self.fixed.get(pd, ())}
         word = {None: 'x', 'limit': '상', 'time': '시', 'ok': 'o'}   # 범례는 branch_cov 화면에
-        tried = ''.join(word.get(r, '?') for _, _, r in self.trace.get(t, [])[-4:])
-        cand = max((len(self.cands.get(v, ())) for v in allv), default=0)
+        tried = ''.join(word.get(r, '?') for _, _, r in self.trace.get(t, [])[-8:])
+        cand = max((len(self.cands_for(v, dict(path))) for v in allv), default=0)
         return f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · 고정stub {len(fixed)} · 탐색 {tried}'
 
     def why_not(self, t, stop=None):
@@ -588,6 +622,7 @@ class Model:
             if not need[d] and (self.outcome(d, V) != o or ((d, o) in bnd and not self.boundary(d, o, V))):
                 return None
         order = list(dict.fromkeys(v for d in sorted(req, key=lambda d: d.pos) for v in need[d]))
+        cl = {v: self.cands_for(v, req) for v in order}
         checks = [(d, o) for d, o in req.items() if need[d]]
 
         def ok(v):
@@ -602,7 +637,7 @@ class Model:
             if i == len(order):
                 return True
             v = order[i]
-            for x in self.cands[v]:
+            for x in cl[v]:
                 nodes[0] += 1
                 if nodes[0] > limit:
                     self.stop = 'limit'
@@ -618,14 +653,103 @@ class Model:
 
         return dict(V) if go(0) else None
 
+    def sparse(self, req, bnd, limit=LIMIT):
+        """나머지 변수는 0으로 두고 1개, 그다음 2개만 바꿔 본다 (그 분기만 보고 값을 정하듯).
+        경로 끝 결정문의 변수부터 본다. 못 찾으면 None, 까닭은 self.stop."""
+        self.stop = None
+        if time.monotonic() > self.deadline:
+            self.stop = 'time'
+            return None
+        ds = sorted(req, key=lambda d: d.pos)
+        vs = list(dict.fromkeys(v for d in reversed(ds) for v in self.vars[d]))
+        cl = {v: self.cands_for(v, req) for v in vs}
+        nodes = [0]
+
+        def ok(V):
+            memo = {}
+            return all(self.outcome(d, V, memo) == req[d] and ((d, req[d]) not in bnd or self.boundary(d, req[d], V))
+                       for d in ds)
+
+        def tries():
+            yield {}
+            for v in vs:
+                for x in cl[v]:
+                    yield {v: x}
+            for i, v in enumerate(vs):
+                for w in vs[i + 1:]:
+                    for x in cl[v]:
+                        for y in cl[w]:
+                            yield {v: x, w: y}
+
+        for V in tries():
+            nodes[0] += 1
+            if nodes[0] > limit:
+                self.stop = 'limit'
+                return None
+            if nodes[0] % 64 == 0 and time.monotonic() > self.deadline:
+                self.stop = 'time'
+                return None
+            if ok(Defaults(V)):
+                return V
+        return None
+
+    def score(self, V, req):
+        """req를 얼마나 맞췄나: 맞춘 결정문마다 100, 못 맞춘 && 참·|| 거짓은 맞춘 조각 수만큼."""
+        memo, s = {}, 0
+        R = lambda i: self.outcome(self.decs[i], V, memo)
+        for d, o in req.items():
+            if self.outcome(d, V, memo) == o:
+                s += 100
+            elif self.parts.get(d) and (self.parts[d][0], o) in (('&&', 'T'), ('||', 'F')):
+                for f in self.parts[d][1]:
+                    try:
+                        s += bool(f(V, R)) == (o == 'T')
+                    except Exception:
+                        pass
+        return s
+
+    def climb(self, req, bnd, limit=LIMIT):
+        """나머지는 0으로 두고, 변수 하나를 바꿔 맞는 조각이 늘면 그 값을 두고 다음으로 (사람이 하나씩 맞추듯)."""
+        self.stop = None
+        ds = sorted(req, key=lambda d: d.pos)
+        vs = list(dict.fromkeys(v for d in reversed(ds) for v in self.vars[d]))
+        cl = {v: self.cands_for(v, req) for v in vs}
+        V, best, full, nodes = {}, self.score(Defaults(), req), 100 * len(req), 0
+        while best < full:
+            better = None
+            for v in vs:
+                for x in cl[v]:
+                    if x == V.get(v, 0):
+                        continue
+                    nodes += 1
+                    if nodes > limit:
+                        self.stop = 'limit'
+                        return None
+                    if nodes % 64 == 0 and time.monotonic() > self.deadline:
+                        self.stop = 'time'
+                        return None
+                    s = self.score(Defaults({**V, v: x}), req)
+                    if s > best:
+                        better, best = {**V, v: x}, s
+                        break
+                if better:
+                    break
+            if better is None:
+                return None   # 더 나아지지 않음
+            V = better
+        W = Defaults(V)
+        return V if all(self.boundary(d, o, W) for d, o in bnd) else None
+
     def solve_alone(self, t, limit=LIMIT):
         """분기 t 하나만 채우는 값. 앞 분기는 안 타는 쪽(0)으로 두고 경로 조건 변수만 바꾸는 빠른 탐색부터,
         경계 바로 옆 값 → 경계 아닌 값 순서로. 못 찾으면 None, 까닭은 self.stop."""
         req, stops = dict(bc.need(*t)), set()
         log = self.trace.setdefault(t, [])   # 진단용: (경계?, 빠른?, 결과)
         for bnd in ([] if t in self.plain else [{t}]) + [set()]:
-            for focus in (True, False):
-                V = self.solve(req, bnd, limit, focus)
+            for focus in ('sparse', 'climb', True, False):   # 1~2개만 → 조각씩 → 경로 조건 변수만 → 전체
+                V = (self.sparse(req, bnd, limit * 10) if focus == 'sparse' else
+                     self.climb(req, bnd, limit * 10) if focus == 'climb' else
+                     self.solve(req, bnd, limit, focus))
                 log.append((bool(bnd), focus, 'ok' if V is not None else self.stop))
                 if V is not None:
                     if not bnd:
@@ -633,8 +757,8 @@ class Model:
                     return V
                 if self.stop == 'time':
                     return None
-                if not focus:
-                    stops.add(self.stop)   # 빠른 탐색이 못 찾은 건 못 가는 증거가 아니다
+                if focus is False:
+                    stops.add(self.stop)   # 전체 탐색이 아닌 건 못 찾아도 못 가는 증거가 아니다
         self.stop = 'limit' if 'limit' in stops else None
         return None
 

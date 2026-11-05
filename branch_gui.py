@@ -41,6 +41,9 @@ class App:
         ttk.Button(top, text='TC 열기', command=self.open_tc).pack(side='left', padx=(12, 0))
         ttk.Button(top, text='TC 저장', command=self.save_tc).pack(side='left')
         ttk.Button(top, text='경계값 TC 만들기', command=self.make_bva).pack(side='left', padx=(12, 0))
+        ttk.Label(top, text=' 시간 한도(초)').pack(side='left')
+        self.budget = tk.StringVar(value=str(bva.BUDGET))
+        ttk.Spinbox(top, from_=5, to=3600, increment=30, width=5, textvariable=self.budget).pack(side='left')
         self.only_miss = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text='못 채운 것만', variable=self.only_miss,
                         command=self.refresh).pack(side='left', padx=12)
@@ -133,13 +136,22 @@ class App:
         if not self.parsed:
             return
         try:
-            m = bva.Model(self.parsed, [self.src] + self.headers, self.stub_text(), self.stub_zero.get())
+            budget = max(1.0, float(self.budget.get()))
+        except ValueError:
+            budget = bva.BUDGET   # 숫자가 아니면 기본값
+            self.budget.set(str(budget))
+        self.root.config(cursor='watch')   # 계산하는 동안 창이 멈춘다 (최대 시간 한도만큼)
+        self.root.update_idletasks()
+        try:
+            m = bva.Model(self.parsed, [self.src] + self.headers, self.stub_text(), self.stub_zero.get(), budget)
             tcs, manual = m.generate()
         except Exception:
+            self.root.config(cursor='')
             with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
                 f.write(traceback.format_exc())
             messagebox.showerror('경계값 TC', f'만들다 실패함 — 상세: %TEMP%\\{bc.REPORT}')
             return
+        self.root.config(cursor='')
         path = csv_path or filedialog.asksaveasfilename(title='경계값 TC 입력값 저장', defaultextension='.csv',
                                                         filetypes=[('CSV', '*.csv')], initialfile='boundary_tc.csv')
         if not path:   # 취소하면 TC 표기도 붙이지 않는다 (CSV와 표기가 어긋나지 않게)
@@ -156,8 +168,11 @@ class App:
         self.text.see('end')
         self.refresh()
         if not csv_path:
+            timeout = sum('시간 한도' in w for w in manual.values())
             messagebox.showinfo('경계값 TC', f'TC {len(tcs)}개를 만들었습니다.\n'
-                                         f'자동으로 못 만든 분기 {len(self.manual)}개는 아래 목록에 이유가 있습니다.')
+                                         f'자동으로 못 만든 분기 {len(self.manual)}개는 아래 목록에 이유가 있습니다.' +
+                                (f'\n그중 {timeout}개는 시간 한도에 걸렸습니다. 위 "시간 한도(초)"를 늘려 다시 해 보세요.'
+                                 if timeout else ''))
 
     def parse_failed(self):
         with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:

@@ -353,10 +353,20 @@ def test_follow():
     tcs, manual = m2.generate()
     assert (inner, 'T') in m2.plain and (inner, 'T') in set().union(*(g for _, _, g in tcs)), m2.plain
     assert list(manual) == [(inner, 'F')] and bva.reason_kind(manual[(inner, 'F')]) == '갈 수 없는 경로/후보 밖'
-    assert m2.diagnose((inner, 'F')).endswith('탐색 xxxx') and '고정stub 0' in m2.diagnose((inner, 'F'))
+    assert m2.diagnose((inner, 'F')).endswith('탐색 xxxxxxxx') and '고정stub 0' in m2.diagnose((inner, 'F'))
     path = os.path.join(tempfile.mkdtemp(), 'nb.csv')
     m2.write_csv(path, tcs)
     assert '(경계 아님)' in open(path, encoding='utf-8-sig').read()
+
+    # 짧은 경로인데 변수가 많고 조건 셋을 같이 맞춰야 하는 분기: 조각씩 맞춰 간다 (전에는 탐색 상한)
+    n = 24
+    body = ['int z = 0, y = 0;'] + [f'if (a{i} > {37 * i + 11}) {{ y += {i}; }} else if (a{i} == {13 * i + 7}) {{ y -= 1; }}'
+                                  for i in range(n)] + [f'z += a{i};' for i in range(4, n)]
+    body.append('if (k == 3) { if (a0 > 5 && a1 == 7 && z > 30) { return 1; } if (a2 < -3 && a3 > 9) { return 2; } }')
+    sh = 'int sh(' + ', '.join([f'int a{i}' for i in range(n)] + ['int k']) + ') {\n' + '\n'.join(body) + '\nreturn y; }'
+    ps = bc.parse(bc.strip_code(sh))
+    tcs, manual = bva.Model(ps, [sh]).generate()
+    assert not manual and len(set().union(*(g for _, _, g in tcs))) == 102, manual
 
     # TC 없이 명령줄: 결정문 종류와 경계값 요약을 이유 종류로만 찍는다 (이름이 화면에 안 나온다)
     src = (F_SRC.replace('sum', 'secret_sum').replace('Stub_', 'Secret_stub_')
@@ -374,6 +384,7 @@ def test_follow():
 
 def test_gui():
     import tkinter as tk
+    import bva as bva_mod
     import branch_gui as g
     root = tk.Tk()
     root.withdraw()
@@ -405,8 +416,14 @@ def test_gui():
     import tempfile
     app.text.delete('1.0', 'end')
     path = os.path.join(tempfile.mkdtemp(), 'b.csv')
+    app.budget.set('30')   # 시간 한도 칸 (숫자가 아니면 기본값으로 되돌린다)
     app.make_bva(path)
     assert os.path.exists(path) and len(app.result['tcs']) == 6, len(app.result['tcs'])
+    app.budget.set('abc')
+    app.make_bva(os.path.join(tempfile.mkdtemp(), 'b0.csv'))
+    assert app.budget.get() == str(bva_mod.BUDGET)
+    app.text.delete('1.0', 'end')
+    app.make_bva(path)
     assert '15/15' in app.status['text'], app.status['text']
     assert not any('경계값 수동' in x for x in app.warn.get(0, 'end'))
     # stub 탭: 예시는 stub이 없어 뼈대가 안 붙고, 직접 쓴 stub 코드는 채우는 법에 나온다

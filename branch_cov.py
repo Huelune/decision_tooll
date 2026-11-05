@@ -690,7 +690,8 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60):
         lines.append(f'  {k:<20} {len(lns):>3}개  ' + ' '.join(f'L{x}' for x in ls[:8]) +
                      (' …' if len(ls) > 8 else ''))
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
-        lines.append('  분기별 진단  탐색 = 경계·빠른 / 경계·전체 / 일반·빠른 / 일반·전체 순, o 찾음 x 없음 상 상한 시 시간')
+        lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
+                     'o 찾음 x 없음 상 상한 시 시간')
         lines += [f'    L{d.line_of(o)} {o:<4} {m.diagnose((d, o))}' for d, o in sorted(manual, key=lambda t: t[0].pos)]
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
     text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
