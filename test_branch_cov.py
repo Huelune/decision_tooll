@@ -325,6 +325,7 @@ def test_follow():
     tcs, manual = m2.generate()
     assert (inner, 'T') in m2.plain and (inner, 'T') in set().union(*(g for _, _, g in tcs)), m2.plain
     assert list(manual) == [(inner, 'F')] and bva.reason_kind(manual[(inner, 'F')]) == '갈 수 없는 경로/후보 밖'
+    assert m2.diagnose((inner, 'F')).endswith('탐색 xxxx') and '고정stub 0' in m2.diagnose((inner, 'F'))
     path = os.path.join(tempfile.mkdtemp(), 'nb.csv')
     m2.write_csv(path, tcs)
     assert '(경계 아님)' in open(path, encoding='utf-8-sig').read()

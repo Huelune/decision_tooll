@@ -327,7 +327,7 @@ class Model:
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
         self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
         # plain: 경계는 못 맞추고 일반 값으로 채우는 분기, alone: 분기 하나만 채우는 값
-        self.plain, self.stop, self.alone = set(), None, {}
+        self.plain, self.stop, self.alone, self.trace = set(), None, {}, {}
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
@@ -434,12 +434,23 @@ class Model:
         st = self.info['stmts']
         return st[i][2] if i >= 0 and k < st[i][1] else None
 
+    def diagnose(self, t):
+        """못 채운 분기 t를 숫자로만 설명한다 (화면용, 이름 없음)."""
+        path = bc.need(*t)
+        allv = {v for pd, _ in path for v in self.vars.get(pd, ())}
+        own = {v for pd, _ in path for v in self.own.get(pd, ())}
+        fixed = {n for pd, _ in path for n in self.fixed.get(pd, ())}
+        word = {None: 'x', 'limit': '상', 'time': '시', 'ok': 'o'}   # 범례는 branch_cov 화면에
+        tried = ''.join(word.get(r, '?') for _, _, r in self.trace.get(t, [])[-4:])
+        cand = max((len(self.cands.get(v, ())) for v in allv), default=0)
+        return f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · 고정stub {len(fixed)} · 탐색 {tried}'
+
     def why_not(self, t, stop=None):
-        if stop == 'time':
-            return f'계산 시간 한도({self.budget:g}초)를 넘김'
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
         hint = (f" — 고정 stub {', '.join(n + '()' for n in names)} 때문일 수 있음, stub 코드를 추가해 볼 것"
                 if names else '')
+        if stop == 'time':
+            return f'계산 시간 한도({self.budget:g}초)를 넘김' + hint
         if stop == 'limit':
             return '값 조합이 많아 탐색 상한에 걸림' + hint
         return '갈 수 없는 경로이거나 후보 밖 값이 필요함 (경로 조건을 모두 만족하는 값이 없음)' + hint
@@ -530,9 +541,11 @@ class Model:
         """분기 t 하나만 채우는 값. 앞 분기는 안 타는 쪽(0)으로 두고 경로 조건 변수만 바꾸는 빠른 탐색부터,
         경계 바로 옆 값 → 경계 아닌 값 순서로. 못 찾으면 None, 까닭은 self.stop."""
         req, stops = dict(bc.need(*t)), set()
+        log = self.trace.setdefault(t, [])   # 진단용: (경계?, 빠른?, 결과)
         for bnd in ([] if t in self.plain else [{t}]) + [set()]:
             for focus in (True, False):
                 V = self.solve(req, bnd, limit, focus)
+                log.append((bool(bnd), focus, 'ok' if V is not None else self.stop))
                 if V is not None:
                     if not bnd:
                         self.plain.add(t)   # 갈 수는 있는데 경계 바로 옆 값은 못 찾음 → 일반 값으로 채운다
@@ -584,7 +597,7 @@ class Model:
                     break
         if time.monotonic() > self.deadline:   # 시간이 모자라 다시 찾지 못한 것은 시간 초과로 알린다
             for t, why in manual.items():
-                manual[t] = why.replace('값 조합이 많아 탐색 상한에 걸림',
+                manual[t] = why.replace('값 조합이 많아 탐색 상한에 걸림',  # 고정 stub 힌트는 그대로
                                         f'값 조합이 많고 계산 시간 한도({self.budget:g}초) 안에 못 찾음')
         self.deadline = float('inf')
         return tcs, manual
