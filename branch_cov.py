@@ -606,7 +606,7 @@ def main(argv=None):
     ap.add_argument('--time', type=float, default=60, help='경계값 TC 계산 시간 한도(초), 기본 60')
     ap.add_argument('--path', type=int, help='경계값 TC 중 N번의 예상 경로를 줄 번호로 찍는다 (실제 결과와 비교용)')
     ap.add_argument('--inc', action='append', default=[],
-                    help='enum·#define 값을 찾을 헤더 폴더 (하위 폴더까지, 여러 번 줄 수 있음)')
+                    help='enum·#define 값을 찾을 헤더 폴더(하위 폴더까지) 또는 파일. 여러 번 줄 수 있음')
     a = ap.parse_args(argv)
     os.system('cls' if os.name == 'nt' else 'clear')  # 고정 문자열이라 주입 위험 없음
     rpt = os.path.join(tempfile.gettempdir(), REPORT)
@@ -630,6 +630,9 @@ def main(argv=None):
         r = analyze('', tc_text, parsed=parsed)
         # TC 표기 파일이 없으면 경계값 TC로 얼마나 채울 수 있는지 보여 준다 (CSV는 --csv 줄 때만)
         heads = headers_near(a.c_file) + [h for d in a.inc for h in headers_in(d)]
+        if any(not os.path.exists(d) for d in a.inc):
+            print('오류: --inc 로 준 폴더나 파일이 없음 — 경로를 확인하세요')
+            return 1
         extra = (make_bva(parsed, [src] + heads, a.csv, stub_src, not a.stub_free, a.time, a.path)
                  if a.csv or not a.tc_file else None)
     except LookupError:
@@ -656,9 +659,15 @@ def headers_near(c_path):
 
 
 def headers_in(folder, deep=True):
-    """폴더(deep이면 하위 폴더까지)의 .h 내용들. enum·#define 값과 변수 선언을 찾는 데 쓴다."""
+    """폴더(deep이면 하위 폴더까지)의 .h·.hpp 내용들, 또는 파일 하나(확장자 상관없이).
+    enum·#define 값과 변수 선언을 찾는 데 쓴다."""
+    if os.path.isfile(folder):
+        files = [folder]
+    else:
+        files = [h for ext in ('*.h', '*.hpp')
+                 for h in glob.glob(os.path.join(folder, '**' if deep else '', ext), recursive=deep)]
     out = []
-    for h in glob.glob(os.path.join(folder, '**' if deep else '', '*.h'), recursive=deep):
+    for h in files:
         try:
             out.append(_read(h))
         except OSError:
@@ -687,6 +696,9 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     if plain:   # 갈 수는 있지만 경계 바로 옆 값이 없는 분기 (예: 바깥 조건이 더 좁음)
         lines.append(f'  그중 경계가 아닌 값으로 채운 분기 {len(got & m.plain)}개  ' +
                      ' '.join(f'L{x}' for x in plain[:8]) + (' …' if len(plain) > 8 else ''))
+    cs = m.cstats   # 헤더를 읽었는지, 상수를 몇 개 구했는지 (이름 없이 개수만)
+    lines.append(f"헤더 파일 {len(srcs) - 1}개 · 읽은 상수 {cs['consts']}개 · 값을 못 구한 #define {len(cs['failed'])}개"
+                 f" (#define {cs['defines']}개 중)")
     if stub_src.strip():   # 넣은 stub 코드가 실제로 쓰였는지 (이름 없이 개수만)
         n, used, free, mth = m.stubs.counts()
         lines.append(f'stub 코드 함수 {n}개: 반환식으로 계산 {used}개 · 수학 함수 이름이라 실제 값 {mth}개'
@@ -711,6 +723,7 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
     text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
     text += ['', '# 값을 모르는 상수 (정의된 헤더 폴더를 --inc 로)'] + unknown
+    text += ['', '# 값을 못 구한 #define (식 안의 이름을 모르거나 숫자 식이 아님)'] + cs['failed']
     return lines, '\n'.join(text) + '\n'
 
 

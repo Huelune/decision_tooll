@@ -202,7 +202,7 @@ def const_eval(expr, consts):
         raise Manual(f'상수 식 계산 실패 ({expr.strip()})') from None
 
 
-def constants(srcs):
+def constants(srcs, stats=None):
     """#define 상수와 enum 값. #define 식((A + 1), (1 << 3), 캐스트)도 계산하고, 다른 헤더의 상수를 쓰는 것도
     읽는 순서와 상관없이 값이 더 정해지지 않을 때까지 여러 번 돌려 채운다."""
     out = {'NULL': 0, 'TRUE': 1, 'FALSE': 0, 'true': 1, 'false': 0}
@@ -235,6 +235,10 @@ def constants(srcs):
                 v = out[name]
         if len(out) == n:
             break
+    if stats is not None:   # 화면용 숫자와 상세 파일용 이름
+        stats['defines'] = len({name for name, _ in defs})
+        stats['failed'] = sorted({name for name, _ in defs if name not in out})
+        stats['consts'] = len(out) - 5
     return out
 
 
@@ -375,7 +379,8 @@ class Model:
         self.budget = budget
         self.decs = sorted(parsed[0], key=lambda d: d.pos)
         self.info = parsed[3]
-        self.consts = constants(srcs + [stub_src])
+        self.cstats = {}
+        self.consts = constants(srcs + [stub_src], self.cstats)
         self.stubs = Stubs(stub_src, self.consts, stub_zero)
         self.fixed, self.float_hint = {}, set()   # 결정문 -> 고정값 stub 이름들 / float stub 반환 변수
         text = self.text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])

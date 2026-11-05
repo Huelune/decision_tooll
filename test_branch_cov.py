@@ -390,6 +390,19 @@ def test_follow():
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
     assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    # --inc 에 파일을 직접 줘도 (확장자 상관없이) 읽고, 읽은 개수를 화면에
+    txt = os.path.join(root, 'secret_defs.txt')
+    open(txt, 'w', encoding='utf-8').write('#define eSecretRun (4u)\n#define secret_bad (NOPE + 1)\n')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path, '--inc', txt]) == 0
+    out = buf.getvalue()
+    assert '4/4 채움' in out and '헤더 파일 1개' in out and '값을 못 구한 #define 1개' in out, out
+    assert 'secret' not in out.lower()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([c_path, '--inc', os.path.join(root, 'no_such')]) == 1
+    assert '--inc' in buf.getvalue()
     # Windows 줄 끝(CRLF) 헤더의 #ifndef 안 #define (전에는 줄 끝 \r 때문에 못 읽었다)
     crlf = os.path.join(root, 'inc', 'crlf.h')
     open(crlf, 'wb').write(b'#ifndef LIM_X\r\n#define LIM_X        (7u)\r\n#endif\r\n')
