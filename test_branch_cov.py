@@ -1,5 +1,8 @@
 """실행: python test_branch_cov.py  (secret 이 든 이름이 화면에 안 나오는지도 본다)"""
 import contextlib
+import csv
+import os
+import sys
 import io
 
 import branch_cov as bc
@@ -105,7 +108,10 @@ def test():
 
     test_howto()
     test_bva()
+    test_expr()
+    test_follow()
     test_gui()
+    test_utf8_output()
     print('OK')
     print(screen)
 
@@ -136,7 +142,7 @@ def test_howto():
     assert vals == {'p': '입력 인자', 'stub_ok': 'stub 반환값', 'v': 'get_val stub 반환값 (L4)',
                     'q': '입력 인자', 'st->mode': '입력 인자 st가 가리키는 값',   # &q 로 넘겨도 안 바뀜
                     'g_flag': '전역/외부 값'}, vals
-    assert bc.values(bc.need(d[8], 'T'), p[3])['st->n'] == '함수 안에서 계산 (L6)'
+    assert bc.values(bc.need(d[8], 'T'), p[3])['st->n'] == '대입을 따라 계산 (L6)'
     # 채우는 법의 줄들을 그대로 TC로 쓰면 그 분기가 채워진다
     tc = '\n'.join(bc.tc_line(i, x, o) for i, (x, o) in enumerate(bc.need(d[7], 'T'), 1))
     assert (d[7], 'T') in bc.analyze('', tc, parsed=p)['cov'], tc
@@ -166,20 +172,18 @@ def test_bva():
     p = bc.parse(bc.strip_code(src), 'example')
     m = bva.Model(p, [src])
     tcs, manual = m.generate()
-    # case 5개 + x>3 T/F 가 둘 다 case 2 → 최소 6개. while(r>100)은 r이 함수 안 계산값이라 수동
-    assert len(tcs) == 6, len(tcs)
-    assert sorted((d.line, o) for d, o in manual) == [(35, 'F'), (35, 'T')], manual
-    assert all('계산' in why for why in manual.values())
-    # 모든 자동 분기를 경계로 채운다: T와 F가 경계 한 칸 차이
+    # case 5개 + x>3 T/F 가 둘 다 case 2 → 최소 6개. while(r>100)의 r은 대입을 경로대로 따라가 계산
+    assert len(tcs) == 6 and not manual, (len(tcs), manual)
+    # 모든 분기를 경계로 채운다: T와 F가 경계 한 칸 차이
     got = set().union(*(g for _, _, g in tcs))
-    assert len(got) == 13
+    assert len(got) == 15
     by = {(d.line, o): V for V, _, g in tcs for d, o in g}
     assert by[(23, 'T')]['x'] == 4 and by[(23, 'F')]['x'] == 3
     assert by[(12, 'T')]['c'] == 9 and by[(12, 'F')]['c'] == 10
     assert by[(6, 'T')]['a'] == 1 and by[(6, 'F')]['a'] in (0, 2)
-    # 만든 TC 표기를 다시 읽으면 while 말고 다 채워진다
+    # 만든 TC 표기를 다시 읽으면 다 채워진다
     r = bc.analyze('', m.tc_text(tcs), parsed=p)
-    assert sorted((ln, o) for ln, _, o in r['missing']) == [(35, 'F'), (35, 'T')] and not r['warns'], r
+    assert not r['missing'] and not r['warns'], r
     # CSV: 머리줄 + TC 6줄
     path = os.path.join(tempfile.mkdtemp(), 'bva.csv')
     m.write_csv(path, tcs)
@@ -218,8 +222,10 @@ def test_bva():
     vals = {(d.line, o): V for V, _, g in tcs for d, o in g}
     assert vals[(10, 'T')]['g_temp'] == 30.1 and vals[(10, 'F')]['g_temp'] == 30, vals
     s = bva.Stubs('int a(int x){return x;} int b(void){return 3;} int c(void){ if(g) return 1; return 0; }')
-    assert s.ref('b') == ('3', [], [3]) and s.ref('a')[1] == ['a()'] and s.ref('c')[1] == ['c()']
-    assert s.ref('zz') == ('0', [], [0]) and bva.Stubs('', zero=False).ref('zz')[1] == ['zz()']
+    assert s.ref('b')[0]({}, None) == 3 and s.ref('b')[1:] == ([], [3])
+    assert s.ref('a')[1] == ['a()'] and s.ref('c')[1] == ['c()']
+    assert s.ref('zz')[0]({}, None) == 0 and s.ref('zz')[1:] == ([], [0])
+    assert bva.Stubs('', zero=False).ref('zz')[1] == ['zz()']
     assert s.desc('b') == 'stub 코드: 3 고정' and '자유 입력' in s.desc('a') and '0 고정' in s.desc('zz')
     assert bc.values(bc.need(p[0][2], 'T'), p[3], s)['get_temp'] == 'stub 정의 없음 → 0 고정'
 
@@ -240,6 +246,75 @@ def test_bva():
         assert bc.main([c_path, '--func', 'secret_func', '--csv', os.path.join(d, 'secret.csv')]) == 0
     assert 'secret' not in buf.getvalue().lower() and '경계값 TC' in buf.getvalue(), buf.getvalue()
     assert os.path.exists(os.path.join(d, 'secret.csv'))
+
+
+F_SRC = r'''
+int f(int a, int n)
+{
+    int ret = 0;
+    int v = a + 5;
+    int sum = 0;
+    int i, w;
+    ret = Stub_A();
+    if (ret == 0) { ret = Stub_B(); }
+    if (ret == 0) { return 1; }
+    if (v > 100) { return 2; }
+    for (i = 0; i < n; i++) { sum += a; w = Stub_C(); if (w == 1) { n = 0; } }
+    if (sum > 3) { return 3; }
+    return 0;
+}
+'''
+
+
+def test_expr():
+    """조건식 해석: eval 없이 C 규칙대로 계산한다."""
+    import bva
+
+    def ev(c, **V):
+        f, _, _ = bva.translate(c, {'K': 3}, lambda t, call: bva._var(t))
+        return f(V, None)
+    assert ev('-7 / 2') == -3 and ev('-7 % 2') == -1 and ev('7 / 2') == 3   # 0 쪽으로 버림
+    assert ev('010') == 8 and ev('0x10') == 16 and ev('1.5f') == 1.5          # 8진수, float 접미사
+    assert ev('1 + 2 * 3 == 7 && !0') == 1 and ev('(1 + 2) * 3') == 9
+    assert ev('a & 4 || b', a=4, b=0) == 1 and ev('1 << K') == 8 and ev('~0') == -1
+    assert ev('(uint8)a > -1', a=0) == 1                                      # 형 변환은 벗긴다
+    assert ev('a != 0 && 10 / a > 2', a=0) == 0                               # 단락 평가: 0으로 안 나눔
+    for bad in ('a ? 1 : 2', 'sizeof(a)', 'UNKNOWN_K > 1', '(a > 1'):
+        try:
+            ev(bad, a=1)
+            raise AssertionError(bad)
+        except bva.Manual:
+            pass
+    try:
+        ev('1 << a', a=1000)   # 큰 시프트는 계산하지 않는다 (outcome에서 결과 모름)
+        raise AssertionError('shift')
+    except ValueError:
+        pass
+
+
+def test_follow():
+    """함수 안에서 대입한 값: 경로대로 따라가 stub 반환값·입력으로 계산한다."""
+    import bva
+    p = bc.parse(bc.strip_code(F_SRC))
+    d = {x.line: x for x in p[0]}
+    m = bva.Model(p, [F_SRC], stub_zero=False)
+    tcs, manual = m.generate()
+    # 반복문 안에서 쌓은 값만 수동 (반복 횟수에 따라 다름)
+    assert sorted((x.line, o) for x, o in manual) == [(13, 'F'), (13, 'T')], manual
+    assert all('반복문' in why for why in manual.values()) and d[12] not in m.manual, m.manual
+    assert set(m.cols) == {'Stub_A()', 'Stub_B()', 'Stub_C()', 'a', 'n'}, m.cols
+    by = {(x.line, o): V for V, _, g in tcs for x, o in g}
+    # ret = A(); if (ret == 0) ret = B(); 뒤의 ret == 0 은 A·B 둘 다 0일 때만 참
+    assert by[(10, 'T')]['Stub_A()'] == 0 and by[(10, 'T')]['Stub_B()'] == 0, by[(10, 'T')]
+    assert m.run(by[(10, 'T')])[d[10]] == 'T' and m.run({**by[(10, 'T')], 'Stub_A()': 1})[d[10]] == 'F'
+    # v = a + 5; v > 100 → a 경계 95 / 96
+    assert by[(11, 'T')]['a'] == 96 and by[(11, 'F')]['a'] == 95, (by[(11, 'T')], by[(11, 'F')])
+    # 반복문 안에서 같은 회차에 받은 stub 값은 그대로 쓴다
+    assert (d[12], 'T') in {t for _, _, g in tcs for t in g}, tcs
+    assert bva.needed_stubs(p) == ['Stub_A', 'Stub_B', 'Stub_C'], bva.needed_stubs(p)
+    # 정의 안 한 stub은 0 → ret == 0 이 늘 참이라 뒤로 못 간다. 그 stub 이름을 알려 준다
+    tcs, manual = bva.Model(p, [F_SRC]).generate()
+    assert 'Stub_A()' in manual[(d[11], 'T')] and 'Stub_B()' in manual[(d[11], 'T')], manual
 
 
 def test_gui():
@@ -270,21 +345,58 @@ def test_gui():
     app.add_tc()
     app.refresh()
     assert '15/15' in app.status['text'] and len(app.result['tcs']) == 5, app.status['text']
-    # 경계값 TC: 빈 칸에서 만들면 while 2개만 남고 수동 이유가 경고 목록에 나온다
+    # 경계값 TC: 빈 칸에서 만들면 다 채워지고 수동 경고가 없다
     import os
     import tempfile
     app.text.delete('1.0', 'end')
     path = os.path.join(tempfile.mkdtemp(), 'b.csv')
     app.make_bva(path)
     assert os.path.exists(path) and len(app.result['tcs']) == 6, len(app.result['tcs'])
-    assert '13/15' in app.status['text'], app.status['text']
-    assert any('경계값 수동' in x for x in app.warn.get(0, 'end'))
+    assert '15/15' in app.status['text'], app.status['text']
+    assert not any('경계값 수동' in x for x in app.warn.get(0, 'end'))
     # stub 탭: 예시는 stub이 없어 뼈대가 안 붙고, 직접 쓴 stub 코드는 채우는 법에 나온다
     import bva
     assert bva.needed_stubs(app.parsed) == []   # 예시 함수에는 분기에 값이 들어가는 stub이 없다
     app.stub.insert('1.0', 'int x_stub(void) { return 7; }')
     assert app.stubs().desc('x_stub') == 'stub 코드: 7 고정'
+
+    # 저장 안 한 내용 지키기 (대화 상자는 가짜로 바꿔 답한다)
+    asked = []
+    g.messagebox.showerror = g.messagebox.showinfo = lambda *a, **k: asked.append(a[0])
+    g.messagebox.askyesnocancel = lambda *a, **k: asked.append(a[0])   # None = 취소
+    g.filedialog.asksaveasfilename = lambda *a, **k: ''                  # 저장 위치 고르기 취소
+    before, n = app.tc_text(), len(app.result['tcs'])
+    app.make_bva()                                    # CSV 취소 → TC 표기도 안 붙인다
+    assert app.tc_text() == before
+    app.make_bva(os.path.join(tempfile.mkdtemp(), 'no_dir', 'b.csv'))   # 못 쓰면 안 붙인다
+    assert app.tc_text() == before and 'CSV' in asked
+    path = os.path.join(tempfile.mkdtemp(), 'b2.csv')
+    app.make_bva(path)                                # 붙일 때 CSV TC 번호는 왼쪽 순번에 이어서
+    rows = list(csv.reader(open(path, encoding='utf-8-sig')))
+    assert rows[1][0] == f'TC{n + 1}' and f'경계 TC{n + 1}' in app.tc_text(), rows[1]
+    bad = os.path.join(tempfile.mkdtemp(), 'bad.c')
+    open(bad, 'w', encoding='utf-8').write('int f(int a) { if (a) { return 1; }')   # 괄호 짝 틀림
+    app.load_c(bad)                                   # 해석 실패 → 보던 파일 그대로
+    assert app.parsed and app.src.startswith('/*') and app.func.get() == 'example'
+    app.func.set('없는함수')
+    app.set_func()                                    # 실패하면 함수 선택도 되돌린다
+    assert app.func.get() == 'example'
+    app.close()                                       # 저장 안 한 TC → 물어보고, 취소하면 안 닫힌다
+    assert asked[-1] == 'TC 저장' and root.winfo_exists()
+    app.text.delete('1.0', 'end')                     # 다 지운 것도 바뀐 것
+    app.saved = 'x'
+    app.close()
+    assert asked[-1] == 'TC 저장' and root.winfo_exists()
     root.destroy()
+
+
+def test_utf8_output():
+    """영문 Windows처럼 출력이 cp1252여도 한글 화면이 죽지 않는다."""
+    import subprocess
+    env = dict(os.environ, PYTHONIOENCODING='cp1252')
+    for args in (['branch_cov.py', 'example.c', '--func', 'example'], ['branch_cov.py', '--help']):
+        r = subprocess.run([sys.executable, *args], capture_output=True, env=env)
+        assert r.returncode == 0 and '분기'.encode() in r.stdout, r.stderr[-300:]
 
 
 if __name__ == '__main__':

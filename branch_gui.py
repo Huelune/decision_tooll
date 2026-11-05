@@ -26,6 +26,7 @@ ALL = '(전체)'
 class App:
     def __init__(self, root, c_path=None, func=None):
         self.root, self.src, self.parsed, self.tc_path, self.saved = root, '', None, None, ''
+        self.active_func = ALL
         self.job, self.rows, self.result, self.headers, self.manual = None, {}, None, [], {}
         root.title('분기 커버리지 도우미')
         root.geometry('1100x700')
@@ -99,28 +100,32 @@ class App:
             self.load_c(path)
 
     def load_c(self, path, func=None):
+        # 다 읽고 해석에 성공한 뒤에만 바꾼다 (실패하면 보던 파일 그대로)
         try:
-            self.src = bc._read(path)
-            self.headers = bc.headers_near(path)
-            funcs = bc.parse(bc.strip_code(self.src))[2]
+            src, headers = bc._read(path), bc.headers_near(path)
+            funcs = bc.parse(bc.strip_code(src))[2]
+            f = func if func in funcs else (funcs[0] if len(funcs) == 1 else ALL)
+            parsed = bc.parse(bc.strip_code(src), None if f == ALL else f)
         except OSError:
             messagebox.showerror('C 파일', '파일을 열 수 없음 — 경로를 확인하세요')
             return
         except Exception:
             self.parse_failed()
             return
+        self.src, self.headers, self.parsed, self.active_func, self.manual = src, headers, parsed, f, {}
         self.func['values'] = [ALL] + funcs
-        self.func.set(func if func in funcs else (funcs[0] if len(funcs) == 1 else ALL))
-        self.set_func()
+        self.func.set(f)
+        self.refresh()
 
     def set_func(self):
         f = self.func.get()
         try:
-            self.parsed = bc.parse(bc.strip_code(self.src), None if f == ALL else f)
+            parsed = bc.parse(bc.strip_code(self.src), None if f == ALL else f)
         except Exception:
+            self.func.set(self.active_func)
             self.parse_failed()
             return
-        self.manual = {}
+        self.parsed, self.active_func, self.manual = parsed, f, {}
         self.refresh()
 
     def make_bva(self, csv_path=None):
@@ -129,7 +134,7 @@ class App:
             return
         try:
             m = bva.Model(self.parsed, [self.src] + self.headers, self.stub_text(), self.stub_zero.get())
-            tcs, self.manual = m.generate()
+            tcs, manual = m.generate()
         except Exception:
             with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
                 f.write(traceback.format_exc())
@@ -137,13 +142,17 @@ class App:
             return
         path = csv_path or filedialog.asksaveasfilename(title='경계값 TC 입력값 저장', defaultextension='.csv',
                                                         filetypes=[('CSV', '*.csv')], initialfile='boundary_tc.csv')
-        if path:
-            try:
-                m.write_csv(path, tcs)
-            except OSError:
-                messagebox.showerror('CSV', '파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지 확인하세요')
+        if not path:   # 취소하면 TC 표기도 붙이지 않는다 (CSV와 표기가 어긋나지 않게)
+            return
         body = self.tc_text().rstrip()
-        self.text.insert('end', ('\n\n' if body else '') + m.tc_text(tcs))
+        start = len(bc.read_tcs(body)) + 1   # CSV의 TC 번호를 왼쪽 TC 순번과 맞춘다
+        try:
+            m.write_csv(path, tcs, start)
+        except OSError:
+            messagebox.showerror('CSV', '파일을 쓸 수 없음 — 엑셀에서 열려 있지 않은지 확인하세요')
+            return
+        self.manual = manual
+        self.text.insert('end', ('\n\n' if body else '') + m.tc_text(tcs, start))
         self.text.see('end')
         self.refresh()
         if not csv_path:
@@ -165,6 +174,8 @@ class App:
         except OSError:
             messagebox.showerror('TC', '파일을 열 수 없음 — 경로를 확인하세요')
             return
+        if not self.confirm('TC 저장', 'TC 표기', self.tc_text(), self.saved, self.save_tc):
+            return
         self.text.delete('1.0', 'end')
         self.text.insert('1.0', body)
         self.tc_path, self.saved = path, self.tc_text()
@@ -174,21 +185,33 @@ class App:
                                                             filetypes=[('텍스트', '*.txt')])
         if not path:
             return False
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(self.tc_text())
+        if not self.write(path, self.tc_text(), 'TC 저장'):
+            return False
         self.tc_path, self.saved = path, self.tc_text()
         return True
 
+    @staticmethod
+    def write(path, text, title):
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            return True
+        except OSError:
+            messagebox.showerror(title, '파일을 쓸 수 없음 — 경로와 파일 권한을 확인하세요')
+            return False
+
+    @staticmethod
+    def confirm(title, what, now, saved, save):
+        """저장 안 한 내용이 있으면 물어본다 (다 지운 것도 바뀐 것). 계속해도 되면 True."""
+        if now == saved:
+            return True
+        ans = messagebox.askyesnocancel(title, f'저장하지 않은 {what}이(가) 있습니다. 저장할까요?')
+        return ans is not None and (not ans or save())
+
     def close(self):
-        if self.tc_text().strip() and self.tc_text() != self.saved:
-            ans = messagebox.askyesnocancel('TC 저장', '저장하지 않은 TC 표기가 있습니다. 저장할까요?')
-            if ans is None or (ans and not self.save_tc()):
-                return
-        if self.stub_text().strip() and self.stub_text() != self.stub_saved:
-            ans = messagebox.askyesnocancel('stub 저장', '저장하지 않은 stub 코드가 있습니다. 저장할까요?')
-            if ans is None or (ans and not self.save_stub()):
-                return
-        self.root.destroy()
+        if self.confirm('TC 저장', 'TC 표기', self.tc_text(), self.saved, self.save_tc) and \
+                self.confirm('stub 저장', 'stub 코드', self.stub_text(), self.stub_saved, self.save_stub):
+            self.root.destroy()
 
     # --- stub 코드 ---
     def stub_text(self):
@@ -207,6 +230,8 @@ class App:
         except OSError:
             messagebox.showerror('stub', '파일을 열 수 없음 — 경로를 확인하세요')
             return
+        if not self.confirm('stub 저장', 'stub 코드', self.stub_text(), self.stub_saved, self.save_stub):
+            return
         self.stub.delete('1.0', 'end')
         self.stub.insert('1.0', body)
         self.stub_path, self.stub_saved = path, self.stub_text()
@@ -215,8 +240,8 @@ class App:
         path = self.stub_path or filedialog.asksaveasfilename(defaultextension='.c', filetypes=[('C', '*.c')])
         if not path:
             return False
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(self.stub_text())
+        if not self.write(path, self.stub_text(), 'stub 저장'):
+            return False
         self.stub_path, self.stub_saved = path, self.stub_text()
         return True
 
@@ -345,4 +370,5 @@ def main():
 
 
 if __name__ == '__main__':
+    bc.utf8_output()
     main()

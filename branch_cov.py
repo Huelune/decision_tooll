@@ -77,7 +77,11 @@ def parse(clean, func=None):
     decs, keys, funcs = [], {}, []
     guards = []   # 지금 위치에서 유효한 조기 반환 회피 조건 (블록을 나가면 줄어든다)
     cur = {'func': None}
-    info = {'params': {}, 'body': {}, 'set': {}}   # set: 이름 -> [(토큰 위치, 줄, 받은 stub 이름 또는 None)]
+    sw = []       # 지금 들어 있는 switch 본문들: (switch 결정문, 여기까지 흘러올 수 있는 case들)
+    # set: 이름 -> [(토큰 위치, 줄, 받은 stub 이름 또는 None, 연산, 오른쪽 식)]
+    # stmts: 단순 문장 [(시작, 끝 토큰, (부모, 가드, 반복문 시작 위치 또는 False, switch 묶음))]
+    # loops: 반복문 시작 위치 -> 끝 위치, locals: 함수 -> 선언한 지역 변수 이름들
+    info = {'params': {}, 'body': {}, 'set': {}, 'stmts': [], 'loops': {}, 'locals': {}}
 
     def T(k):
         return toks[k][0] if 0 <= k < len(toks) else ''
@@ -183,10 +187,12 @@ def parse(clean, func=None):
             d = add('switch', cond, at, parent, loop)
             if T(k) != '{':
                 return stmt(k, parent, loop)
-            k, last, group, cur, fresh, n = k + 1, 'start', [], parent, True, len(guards)
+            k, last, group, cpar, fresh, n, live = k + 1, 'start', [], parent, True, len(guards), []
             while T(k) != '}':
                 if T(k) in ('case', 'default'):
                     del guards[n:]
+                    if not group and (last in TERMINAL or last == 'start'):
+                        live = []
                     j = k + 1
                     while T(j) != ':':
                         if T(j) == '':
@@ -198,6 +204,7 @@ def parse(clean, func=None):
                         v = norm(clean[toks[k + 1][1]:toks[j][1]])
                         lab, key = 'case ' + v, ('case', v)
                     d.labels.append((lab, line(k)))
+                    live.append(lab)
                     index(key, k, d, lab)
                     if not group:  # 앞 case에서 흘러들어오면(fall-through) 어느 case인지 모른다
                         fresh = last in TERMINAL or last == 'start'
@@ -205,23 +212,33 @@ def parse(clean, func=None):
                     k = j + 1
                     continue
                 if group:
-                    cur = (d, group[0]) if len(group) == 1 and fresh else parent
+                    cpar = (d, group[0]) if len(group) == 1 and fresh else parent
                     group = []
-                k, last = stmt(k, cur, loop)
+                sw.append((d, tuple(live)))
+                k, last = stmt(k, cpar, loop)
+                sw.pop()
             del guards[n:]
             return k + 1, None
         if t == 'while':
             cond, k2 = paren(k + 1)
             d = add('while', cond, k, parent, loop)
-            return body(k2, (d, 'T'), True)[0], None
+            info['loops'][k] = e = body(k2, (d, 'T'), k)[0]
+            return e, None
         if t == 'for':
             j = close(k + 1)
             parts = clean[toks[k + 1][1] + 1:toks[j][1]].split(';')
             mid = parts[1] if len(parts) == 3 else ''
-            d = add('for', mid, k, parent, loop) if mid.strip() else None
-            return body(j + 1, (d, 'T') if d else parent, True)[0], None
+            s, dep = k + 2, 0   # 초기식 끝 ';' (조건보다 먼저 실행되는 대입)
+            while s < j and not (T(s) == ';' and dep == 0):
+                dep += (T(s) in '([') - (T(s) in ')]')
+                s += 1
+            info['stmts'].append((k + 2, s, (parent, tuple(guards), loop, tuple(sw))))
+            d = add('for', mid, s, parent, loop) if mid.strip() else None
+            info['loops'][k] = e = body(j + 1, (d, 'T') if d else parent, k)[0]
+            return e, None
         if t == 'do':
-            k = body(k + 1, parent, True)[0]
+            k0, k = k, body(k + 1, parent, k)[0]
+            info['loops'][k0] = k + 1   # do-while 조건까지 반복문 안
             if T(k) != 'while':
                 raise SyntaxError('do')
             cond, k2 = paren(k + 1)
@@ -233,7 +250,16 @@ def parse(clean, func=None):
             return k + 1, None
         if re.fullmatch(r'[A-Za-z_]\w*', t) and T(k + 1) == ':':  # goto 레이블
             return stmt(k + 2, parent, loop)
-        return skip_to_semi(k), None
+        e = skip_to_semi(k)
+        info['stmts'].append((k, e, (parent, tuple(guards), loop, tuple(sw))))
+        if _is_ident(t) and (_is_ident(T(k + 1)) or T(k + 1) == '*'):   # 선언: 형 이름 [*]이름 …
+            dep = 0
+            for i in range(k + 1, e):
+                dep += (T(i) in '([{') - (T(i) in ')]}')
+                if dep == 0 and _is_ident(T(i)) and T(i + 1) in ('=', ';', ',', '[') and \
+                        (_is_ident(T(i - 1)) or T(i - 1) in ('*', ',')):
+                    info['locals'].setdefault(cur['func'], set()).add(T(i))
+        return e, None
 
     k = 0
     while k < len(toks):
@@ -257,7 +283,7 @@ def parse(clean, func=None):
         k = j + 1
     if func is not None and not funcs:
         raise LookupError('func')
-    info['set'] = assignments(toks, T, line)
+    info['set'] = assignments(toks, T, line, clean)
     return decs, keys, funcs, info
 
 
@@ -265,8 +291,9 @@ def _is_ident(t):
     return bool(re.fullmatch(r'[A-Za-z_]\w*', t))
 
 
-def assignments(toks, T, line):
-    """값이 바뀌는 곳: 'a' / 'p->b' / 's.x' -> [(토큰 위치, 줄, v = f(); 면 f)]. a[i] 는 a 로 센다."""
+def assignments(toks, T, line, clean=''):
+    """값이 바뀌는 곳: 'a' / 'p->b' / 's.x' -> [(토큰 위치, 줄, v = f(); 면 f, 연산, 오른쪽 식)].
+    연산은 '=' 또는 += 의 '+' 같은 것. a[i] 는 a 로 센다."""
     def op(k, s):  # k부터 붙어 있는 문자 토큰이 s인가
         return all(T(k + i) == c for i, c in enumerate(s)) and \
             all(toks[k + i][1] == toks[k][1] + i for i in range(len(s)) if k + i < len(toks))
@@ -306,8 +333,24 @@ def assignments(toks, T, line):
                 if d == 0:
                     break
             call = T(e + 1) if T(j + 1) == ';' else None
-        if changed:
-            out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), call))
+        if not changed:
+            continue
+        if T(e) == '=':
+            o, s = '=', e + 1
+        elif op(e, '<<=') or op(e, '>>='):
+            o, s = T(e) * 2, e + 3
+        elif T(e) in '+-*/%&|^' and op(e + 1, '='):
+            o, s = T(e), e + 2
+        else:   # ++ / --
+            o, s = ('+' if '+' in (T(e), T(b - 1)) else '-'), None
+        rhs = '1'
+        if s is not None:
+            d, j = 0, s
+            while T(j) != '' and not (d == 0 and T(j) in (';', ',', ')', ']', '}')):
+                d += (T(j) in ('(', '[', '{')) - (T(j) in (')', ']', '}'))
+                j += 1
+            rhs = clean[toks[s][1]:toks[j][1]] if clean and j < len(toks) else ''
+        out.setdefault(''.join(T(i) for i in range(b, k + 1)), []).append((k, line(k), call, o, rhs))
     return out
 
 
@@ -463,8 +506,9 @@ def source_of(t, d, info):
     lines = ', '.join(f'L{h[1]}' for h in hits[-3:])
     if len(hits) == 1 and hits[0][2]:
         return f'{hits[0][2]} stub 반환값 ({lines})', hits[0][2] + '()'
-    if hits:
-        return f'함수 안에서 계산 ({lines})', None
+    if hits:   # 경계값 TC는 대입을 경로대로 따라가 계산한다 (bva.Model.value)
+        calls = list(dict.fromkeys(h[2] for h in hits if h[2]))
+        return (f"대입을 따라 계산 ({lines}{', stub ' + ', '.join(calls) if calls else ''})"), None
     if base in info['params'].get(d.func, set()):
         return ('입력 인자' if t == base else f'입력 인자 {base}가 가리키는 값'), t
     return '전역/외부 값', t
@@ -612,5 +656,13 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True):
     return len(tcs), len(manual), '\n'.join(text) + '\n'
 
 
+def utf8_output():
+    """출력을 파일·파이프로 돌리면 영문 Windows는 cp1252라 한글에서 죽는다. UTF-8로 바꾼다."""
+    for stream in (sys.stdout, sys.stderr):
+        if callable(getattr(stream, 'reconfigure', None)):   # pythonw는 stream이 None
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+
+
 if __name__ == '__main__':
+    utf8_output()
     sys.exit(main())

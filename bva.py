@@ -7,6 +7,7 @@
 stub에 &로 넘긴 값은 stub이 바꾸지 않는 것으로 본다.
 함수 안에서 계산되는 값이 끼거나 상수 값을 모르는 분기는 '수동'으로 남기고 이유를 적는다.
 """
+import bisect
 import csv
 import re
 
@@ -17,9 +18,32 @@ UNSIGNED_T = r'(?:unsigned|uint\w*|u(?:8|16|32|64)\b|\w*_u(?:8|16|32|64)\w*|U(?:
 INT_T = r'(?:char|short|int|long|signed|unsigned|u?int\w*|[us](?:8|16|32|64)\b|[US](?:8|16|32|64)\w*|U?INT\w*|bool\w*)'
 NUM = r'0[xX][0-9a-fA-F]+[uUlL]*|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?[uUlLfF]*'
 TOK = re.compile(rf'\s*({NUM}|[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)*|&&|\|\||==|!=|<=|>=|<<|>>|\S)')
-OPS = {'&&': 'and', '||': 'or', '!': 'not', '==': '==', '!=': '!=', '<': '<', '>': '>', '<=': '<=',
-       '>=': '>=', '+': '+', '-': '-', '*': '*', '/': '/', '%': '%', '&': '&', '|': '|', '^': '^',
-       '~': '~', '<<': '<<', '>>': '>>', '(': '(', ')': ')'}
+# C 우선순위 (클수록 먼저). ?: 는 다루지 않는다
+PREC = {'||': 1, '&&': 2, '|': 3, '^': 4, '&': 5, '==': 6, '!=': 6, '<': 7, '>': 7, '<=': 7, '>=': 7,
+        '<<': 8, '>>': 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10}
+
+
+def _cdiv(a, b):
+    # C 정수 나눗셈은 0 쪽으로 버린다 (-7 / 2 == -3). Python // 는 아래로 버린다
+    if isinstance(a, int) and isinstance(b, int):
+        q = abs(a) // abs(b)
+        return -q if (a < 0) != (b < 0) else q
+    return a / b
+
+
+def _shift(b):
+    if not 0 <= b <= 64:
+        raise ValueError('shift')   # 큰 시프트로 거대한 정수를 만들지 않게
+    return b
+
+
+BIN = {'+': lambda a, b: a + b, '-': lambda a, b: a - b, '*': lambda a, b: a * b, '/': _cdiv,
+       '%': lambda a, b: a - _cdiv(a, b) * b,
+       '<': lambda a, b: int(a < b), '>': lambda a, b: int(a > b), '<=': lambda a, b: int(a <= b),
+       '>=': lambda a, b: int(a >= b), '==': lambda a, b: int(a == b), '!=': lambda a, b: int(a != b),
+       '&': lambda a, b: a & b, '|': lambda a, b: a | b, '^': lambda a, b: a ^ b,
+       '<<': lambda a, b: a << _shift(b), '>>': lambda a, b: a >> _shift(b)}
+UNARY = {'!': lambda x: int(not x), '~': lambda x: ~x, '-': lambda x: -x, '+': lambda x: x}
 LOOPS = ('while', 'for', 'dowhile')
 LIMIT = 20000  # ponytail: 값 조합 탐색 상한. 넘으면 그 묶음은 못 푼 것으로 보고 다른 TC로 넘긴다
 
@@ -36,60 +60,99 @@ class Defaults(dict):
 def num(s):
     if s.lower().startswith('0x'):
         return int(re.sub(r'[uUlL]+$', '', s), 16)
-    s = re.sub(r'[uUlLfF]+$', '', s)
-    return float(s) if re.search(r'[.eE]', s) else int(s)
+    if re.search(r'[.eE]', s) or re.search(r'[fF]$', s):
+        return float(re.sub(r'[fF]$', '', s))
+    s = re.sub(r'[uUlL]+$', '', s)
+    try:
+        return int(s, 8) if len(s) > 1 and s[0] == '0' else int(s)   # 010 은 8진수 8
+    except ValueError:
+        raise Manual(f'잘못된 숫자 ({s})') from None
 
 
 def translate(cond, consts, var_of=None):
-    """C 식 → (Python 식, 변수 열 이름들, 식에 나온 숫자들).
-    var_of(이름, 함수호출?) → 그 자리에 넣을 (Python 식, 열 이름들, 숫자들) 또는 Manual."""
+    """C 식 → (값 함수 f(V, R), 변수 열 이름들, 식에 나온 숫자들).
+    eval 없이 직접 해석한다: C 우선순위, &&·|| 단락 평가, 0 쪽으로 버리는 정수 나눗셈, 8진수.
+    V는 열 이름 → 값, R(i)는 결정문 i의 결과 (Model.value 참고).
+    var_of(이름, 함수호출?) → 그 자리의 (값 함수, 열 이름들, 숫자들) 또는 Manual."""
     c = re.sub(r'\(\s*(?:(?:unsigned|signed|const|volatile|struct|enum)\s+)*[A-Za-z_]\w*\s*\**\s*\)(?=\s*[\w(!~])',
                ' ', cond)   # 형 변환 (uint8)x 제거
     toks = TOK.findall(c)
-    out, vs, nums, i = [], [], [], 0
-    while i < len(toks):
-        t = toks[i]
-        i += 1
+    vs, nums, at = [], [], [0]
+
+    def peek():
+        return toks[at[0]] if at[0] < len(toks) else ''
+
+    def atom():
+        t = peek()
+        at[0] += 1
+        if t == '-' and re.fullmatch(NUM, peek()):   # 음수 상수는 그 값을 경계 후보로
+            at[0] += 1
+            x = -num(toks[at[0] - 1])
+            nums.append(x)
+            return lambda V, R: x
+        if t in UNARY:
+            f, op = atom(), UNARY[t]
+            return lambda V, R: op(f(V, R))
+        if t == '(':
+            f = expr(1)
+            if peek() != ')':
+                raise Manual('괄호 짝이 안 맞는 식')
+            at[0] += 1
+            return f
         if re.fullmatch(NUM, t):
-            nums.append(num(t))
-            out.append(repr(num(t)))
-        elif re.match(r'[A-Za-z_]', t):
-            t = re.sub(r'\s+', '', t)
-            call = i < len(toks) and toks[i] == '('
-            if call:   # 인자는 보지 않는다 (stub)
-                d = 0
-                while i < len(toks):
-                    d += (toks[i] == '(') - (toks[i] == ')')
-                    i += 1
-                    if d == 0:
-                        break
-            if not call and t in consts:
-                nums.append(consts[t])
-                out.append(repr(consts[t]))
-                continue
-            if t == 'sizeof':
-                raise Manual('sizeof 식')
-            if not call and re.fullmatch(r'[A-Z][A-Z0-9_]*', t):
-                raise Manual(f'상수 값 모름 ({t})')
-            if var_of is None:
-                raise Manual(f'상수 값 모름 ({t})')
-            src, ks, ns = var_of(t, call)
-            out.append(f'({src})')
-            nums += ns
-            vs += [k for k in ks if k not in vs]
-        elif t in OPS:
-            out.append(OPS[t])
-        else:
-            raise Manual(f'못 다루는 식 ({t})')
-    return ' '.join(out), vs, nums
+            x = num(t)
+            nums.append(x)
+            return lambda V, R: x
+        if not re.match(r'[A-Za-z_]', t):
+            raise Manual(f'못 다루는 식 ({t})' if t else '못 다루는 식')
+        t = re.sub(r'\s+', '', t)
+        call = peek() == '('
+        if call:   # 인자는 보지 않는다 (stub)
+            d = 0
+            while at[0] < len(toks):
+                d += (toks[at[0]] == '(') - (toks[at[0]] == ')')
+                at[0] += 1
+                if d == 0:
+                    break
+        if not call and t in consts:
+            x = consts[t]
+            nums.append(x)
+            return lambda V, R: x
+        if t == 'sizeof':
+            raise Manual('sizeof 식')
+        if var_of is None or (not call and re.fullmatch(r'[A-Z][A-Z0-9_]*', t)):
+            raise Manual(f'상수 값 모름 ({t})')
+        f, ks, ns = var_of(t, call)
+        nums.extend(ns)
+        vs.extend(k for k in ks if k not in vs)
+        return f
+
+    def expr(lo):
+        f = atom()
+        while peek() in PREC and PREC[peek()] >= lo:
+            op = peek()
+            at[0] += 1
+            g = expr(PREC[op] + 1)
+            if op == '&&':
+                f = (lambda a, b: lambda V, R: int(bool(a(V, R)) and bool(b(V, R))))(f, g)
+            elif op == '||':
+                f = (lambda a, b: lambda V, R: int(bool(a(V, R)) or bool(b(V, R))))(f, g)
+            else:
+                f = (lambda a, b, o: lambda V, R: o(a(V, R), b(V, R)))(f, g, BIN[op])
+        return f
+
+    f = expr(1)
+    if at[0] != len(toks):
+        raise Manual(f'못 다루는 식 ({peek()})')
+    return f, vs, nums
 
 
 def const_eval(expr, consts):
-    src, _, _ = translate(expr, consts)
+    f, _, _ = translate(expr, consts)
     try:
-        return eval(src, {})  # translate가 숫자·연산자만 남긴 식이라 안전 (이름이 있으면 Manual)
+        return f({}, None)
     except Exception:
-        raise Manual(f'상수 식 계산 실패 ({expr.strip()})')
+        raise Manual(f'상수 식 계산 실패 ({expr.strip()})') from None
 
 
 def constants(srcs):
@@ -98,7 +161,10 @@ def constants(srcs):
     for src in srcs:
         for m in re.finditer(rf'^[ \t]*#[ \t]*define[ \t]+(\w+)[ \t]+\(?[ \t]*(-?)[ \t]*({NUM})[ \t]*\)?'
                              r'[ \t]*(?://.*|/\*.*)?$', src, re.M):
-            out[m.group(1)] = (-1 if m.group(2) else 1) * num(m.group(3))
+            try:
+                out[m.group(1)] = (-1 if m.group(2) else 1) * num(m.group(3))
+            except Manual:
+                pass
         for m in re.finditer(r'\benum\b[^{;]*\{([^}]*)\}', bc.strip_code(src)):
             v = -1
             for item in m.group(1).split(','):
@@ -113,8 +179,23 @@ def constants(srcs):
     return out
 
 
+def closure(reqs):
+    """(결정문, 결과)들과 그것들이 평가되려면 필요한 바깥 결과 전부."""
+    seen, stack = set(), list(reqs)
+    while stack:
+        c = stack.pop()
+        if c not in seen:
+            seen.add(c)
+            stack += c[0].reqs()
+    return seen
+
+
 def _var(k):
-    return f'V[{k!r}]', [k], []
+    return (lambda V, R: V[k]), [k], []
+
+
+def _fixed(x):
+    return (lambda V, R: x), [], [x]
 
 
 def _close(s, i):
@@ -161,34 +242,42 @@ class Stubs:
         if name in self.fns:
             return self.fns[name]
         if self.zero and name not in self.note:
-            return '0', [], [0]
+            return _fixed(0)
         return _var(name + '()')
 
     def desc(self, name):
         if name in self.fns:
-            src, vs, _ = self.fns[name]
-            return f"stub 코드: {', '.join(vs)} 값" if vs else f'stub 코드: {eval(src, {})} 고정'
+            f, vs, _ = self.fns[name]
+            return f"stub 코드: {', '.join(vs)} 값" if vs else f'stub 코드: {f({}, None)} 고정'
         if name in self.note:
             return f'stub 반환값 자유 입력 (stub 코드: {self.note[name]})'
         return 'stub 정의 없음 → 0 고정' if self.zero else 'stub 반환값 자유 입력'
 
 
 def needed_stubs(parsed):
-    """분기 조건에 값이 들어가는 stub 이름들 (직접 호출, 또는 v = f(); 로 받은 v를 조건에 씀)."""
-    out = []
-    for d in sorted(parsed[0], key=lambda d: d.pos):
-        c = re.sub(r'\s+', '', d.cond)
+    """분기 조건에 값이 들어가는 stub 이름들 (직접 호출, 또는 조건에 쓴 변수에 대입한 식 안의 호출)."""
+    info, out, seen = parsed[3], [], set()
+
+    def walk(expr, pos, func):
+        c = re.sub(r'\s+', '', expr)
         for m in re.finditer(r'[A-Za-z_]\w*(?:(?:\.|->)[A-Za-z_]\w*)*', c):
             t = m.group()
             if c[max(m.start() - 1, 0):m.start()] == '.' or c[max(m.start() - 2, 0):m.start()] == '->':
                 continue
             if c[m.end():m.end() + 1] == '(':
-                name = t
-            else:
-                col = bc.source_of(t, d, parsed[3])[1]
-                name = col[:-2] if col and col.endswith('()') else None
-            if name and name != 'sizeof' and not name.isupper() and name not in out:
-                out.append(name)
+                if t != 'sizeof' and not t.isupper() and t not in out:
+                    out.append(t)
+                continue
+            a = info['body'].get(func, (0, 0))[0]
+            for p, hs in info['set'].items():
+                if t == p or t.startswith(p + '.') or t.startswith(p + '->'):
+                    for h in hs:
+                        if a < h[0] < pos and h[0] not in seen:
+                            seen.add(h[0])
+                            walk(h[4], h[0], func)
+
+    for d in sorted(parsed[0], key=lambda d: d.pos):
+        walk(d.cond, d.pos, d.func)
     return out
 
 
@@ -218,18 +307,21 @@ class Model:
         text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
+        self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
+        self.info['stmts'].sort(key=lambda s: s[0])
+        self.starts = [s[0] for s in self.info['stmts']]
         for d in self.decs:
             try:
-                src, vs, nums = translate(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
-                f = eval('lambda V: ' + src, {})  # 숫자·연산자·V['열 이름']만 들어 있음 (translate 참고)
+                self.via = False
+                f, vs, nums = translate(d.cond, self.consts, lambda t, call, d=d: self.var_of(t, call, d))
+                if self.via:   # 대입을 거친 값: 조건 숫자 ± 대입 식 숫자도 경계 후보로 (v = a + 5; v > 100 → a 95)
+                    cn = translate(d.cond, self.consts, lambda t, call: _fixed(0))[2]
+                    nums = nums + [n + k * m for n in cn for m in nums for k in (1, -1)]
                 if d.kind == 'switch':
                     self.labels[d] = {lab: const_eval(lab[5:], self.consts) for lab, _ in d.labels if lab != 'default'}
                     nums += list(self.labels[d].values())
             except Manual as e:
                 self.manual[d] = str(e)
-                continue
-            except SyntaxError:
-                self.manual[d] = '못 다루는 식'
                 continue
             self.fn[d], self.vars[d] = f, vs
             flt = any(isinstance(n, float) for n in nums)
@@ -249,20 +341,73 @@ class Model:
                 vals = {int(x) for x in vals}
             self.cands[v] = sorted(vals, key=lambda x: (x < 0, abs(x)))   # 0 이상 작은 값부터
 
-    def var_of(self, t, call, d):
+    def var_of(self, t, call, d, pos=None):
         if not call:
-            why, col = bc.source_of(t, d, self.info)
-            if col is None:
-                raise Manual(f'{t}: {why}')
-            if not col.endswith('()'):
-                return _var(col)
-            t = col[:-2]   # v = f(); 로 받은 값
+            return self.value(t, d.pos if pos is None else pos, d)
         r = self.stubs.ref(t)
         if not r[1]:
             self.fixed.setdefault(d, set()).add(t)
         if re.search(rf'\b{FLOAT_T}', self.stubs.rtype.get(t, '')):
             self.float_hint.update(r[1])   # float stub이 돌려주는 변수는 형을 모르면 float로
         return r
+
+    def value(self, t, pos, d):
+        """pos 바로 앞에서 t의 값 → (값 함수, 열 이름들, 숫자들).
+        마지막 대입부터 거슬러 간다. 조건 안의 대입은 '그 결과로 왔으면 이 값, 아니면 그 앞 값'이 된다.
+        R(i)는 결정문 i의 결과 (outcome이 같은 입력으로 계산)."""
+        a = self.info['body'].get(d.func, (0, 0))[0]
+        hits = sorted((h, p) for p, hs in self.info['set'].items()
+                      if t == p or t.startswith(p + '.') or t.startswith(p + '->')
+                      for h in hs if a < h[0] < pos)
+        base = re.match(r'\w+', t).group()
+        if not hits:
+            if base in self.info['locals'].get(d.func, ()) and base not in self.info['params'].get(d.func, ()):
+                return _fixed(0)   # ponytail: 대입 전 지역 변수는 0으로 본다 (모든 갈래에서 대입하면 안 쓰임)
+            return _var(t)
+        self.via = True
+        h, p = hits[-1]
+        key = (t, h[0], d)   # 경로에서 이미 정해진 조건을 빼므로 결정문마다 따로
+        if key in self.vmemo:
+            return self.vmemo[key]
+        where = f'{t}: L{h[1]}'
+        if p != t:
+            raise Manual(f'{where} 구조체 통째로 대입')
+        if not h[4].strip():
+            raise Manual(f'{where} 못 다루는 대입')
+        ctx = self.stmt_at(h[0])
+        if ctx is None:
+            raise Manual(f'{where} 식 안에서 대입')
+        parent, guards, loop, sws = ctx
+        if loop and not loop < d.pos < self.info['loops'].get(loop, 0):
+            raise Manual(f'{where} 반복문 안에서 대입 (반복 횟수에 따라 다름)')
+        known = self.known.setdefault(d, closure(d.reqs()))
+        conds, dep = [], []
+        for pd, po in sorted(closure(([parent] if parent else []) + list(guards) + list(sws)) - known,
+                             key=lambda c: c[0].pos):
+            if pd not in self.fn:
+                raise Manual(f'{where} 대입이 L{pd.line} 결과에 따라 달라짐')
+            i = self.decs.index(pd)
+            conds.append((i, po if isinstance(po, tuple) else (po,)))
+            dep += self.vars[pd]
+        f, vs, ns = translate(h[4], self.consts, lambda t2, call: self.var_of(t2, call, d, h[0]))
+        if h[3] != '=' or conds:
+            pf, pvs, pns = self.value(t, h[0], d)
+            if h[3] != '=':   # v += e → v_앞 + e
+                f = (lambda a, b, o: lambda V, R: o(a(V, R), b(V, R)))(pf, f, BIN[h[3]])
+                vs, ns = pvs + vs, pns + ns
+            if conds:   # 그 조건으로 왔으면 이 대입 값, 아니면 앞 값
+                f = (lambda a, b, cs: lambda V, R: a(V, R) if all(R(i) in os for i, os in cs) else b(V, R))(
+                    f, pf, conds)
+                vs, ns = vs + dep + pvs, ns + pns
+        out = f, list(dict.fromkeys(vs)), ns
+        self.vmemo[key] = out
+        return out
+
+    def stmt_at(self, k):
+        """토큰 k가 든 단순 문장의 (부모, 가드, 반복문, switch 묶음). 조건식 안이면 None."""
+        i = bisect.bisect_right(self.starts, k) - 1
+        st = self.info['stmts']
+        return st[i][2] if i >= 0 and k < st[i][1] else None
 
     def why_not(self, t):
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})
@@ -278,19 +423,23 @@ class Model:
     def step(self, v):
         return 0.1 if self.isf[v] else 1
 
-    def outcome(self, d, V):
+    def outcome(self, d, V, memo=None):
+        """memo: 같은 V로 이미 계산한 결정문 결과 (대입 값이 앞 결정문 결과에 따라 달라질 때 씀)"""
         if d not in self.fn:
             return None
-        try:
-            x = self.fn[d](V)
-        except Exception:
-            return None
-        if d.kind != 'switch':
-            return 'T' if x else 'F'
-        for lab, val in self.labels[d].items():
-            if x == val:
-                return lab
-        return 'default' if any(lab == 'default' for lab, _ in d.labels) else None
+        memo = {} if memo is None else memo
+        if d not in memo:
+            memo[d] = None
+            try:
+                x = self.fn[d](V, lambda i: self.outcome(self.decs[i], V, memo))
+            except Exception:
+                return None
+            if d.kind != 'switch':
+                memo[d] = 'T' if x else 'F'
+            else:
+                memo[d] = next((lab for lab, val in self.labels[d].items() if x == val),
+                               'default' if any(lab == 'default' for lab, _ in d.labels) else None)
+        return memo[d]
 
     def boundary(self, d, o, V):
         """한 변수를 경계 한 칸 움직이면 결과가 바뀌는가 (= 경계 바로 옆 값인가)."""
@@ -338,10 +487,10 @@ class Model:
 
     def run(self, V):
         """값 V로 지나는 결정문과 결과. 결과를 모르면 None (그 아래는 안 따라감)."""
-        V, res = Defaults(V), {}
+        V, res, memo = Defaults(V), {}, {}
         for d in self.decs:
             if all(res.get(pd) == po for pd, po in d.reqs()):
-                res[d] = self.outcome(d, V)
+                res[d] = self.outcome(d, V, memo)
         return res
 
     def generate(self):

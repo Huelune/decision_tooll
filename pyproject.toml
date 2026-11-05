@@ -1,0 +1,9 @@
+[project]
+name = "decision-tool"
+version = "0.1.0"
+description = "Offline C decision-coverage estimation and boundary-case helper"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false   # 저장소 루트의 스크립트를 그대로 실행한다 (uv run python branch_gui.py)
