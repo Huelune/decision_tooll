@@ -594,9 +594,12 @@ class Model:
     def declared_var(self, name):
         """읽은 코드·헤더 어딘가에 `형 [*]name;`·`= …`·`[`·`,`·`)` 꼴로 변수로 선언됐는가."""
         if name not in self.isvar:
+            n = re.escape(name)
             self.isvar[name] = bool(re.search(
-                rf'\b(?!(?:return|case|goto|else|sizeof|if|while|switch)\b)[A-Za-z_]\w*[\s*]+{re.escape(name)}'
-                rf'\s*(?:[;=,)]|\[)', self.text))
+                rf'\b(?!(?:return|case|goto|else|sizeof|if|while|switch)\b)[A-Za-z_]\w*[\s*]+{n}'
+                rf'\s*(?:[;=,)]|\[)', self.text) or re.search(
+                # 매크로 선언 VAR(uint8, AUTOMATIC) name; P2VAR(…) name — 쉼표가 있어 캐스트 (uint8)name 과 구별
+                rf'\b[A-Z][A-Z0-9_]*\s*\([^()]*,[^()]*\)[\s*]+{n}\s*(?:[;=,)]|\[)', self.text))
         return self.isvar[name]
 
     @staticmethod

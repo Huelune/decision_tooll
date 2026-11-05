@@ -390,6 +390,22 @@ def test_follow():
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
     assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    # 매크로 선언 VAR(uint8, AUTOMATIC) 이름 은 변수 (캐스트와 구별), 모르는 이름이 어디 나오는지 개수
+    a_src = ('static VAR(uint8, VAR_NOINIT) s_secretSt;\n'
+             'FUNC(void, CODE) af(VAR(uint8, AUTOMATIC) secretIn) {\n'
+             '  VAR(uint8, AUTOMATIC) secretLoc;\n'
+             '  if (s_secretSt == (uint8)secretK) { secretLoc = 1; }\n  if (secretIn > 3) { return; }\n}\n')
+    pa = bc.parse(bc.strip_code(a_src))
+    ma = bva.Model(pa, [a_src])
+    assert ma.declared_var('s_secretSt') and not ma.declared_var('secretK') and 'secretIn' in ma.cols
+    assert '상수 값 모름 (secretK)' in ma.manual[pa[0][0]], ma.manual
+    assert 'secretLoc' in pa[3]['locals']['af']
+    a_path = os.path.join(root, 'secret_a.c')
+    open(a_path, 'w', encoding='utf-8').write(a_src)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert bc.main([a_path]) == 0
+    assert 'C 파일에 1번(그 조건)뿐 1개' in buf.getvalue() and 'secret' not in buf.getvalue().lower(), buf.getvalue()
     # --inc 에 파일을 직접 줘도 (확장자 상관없이) 읽고, 읽은 개수를 화면에
     txt = os.path.join(root, 'secret_defs.txt')
     open(txt, 'w', encoding='utf-8').write('#define eSecretRun (4u)\n#define secret_bad (NOPE + 1)\n')

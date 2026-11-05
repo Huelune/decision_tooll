@@ -253,12 +253,16 @@ def parse(clean, func=None):
             return stmt(k + 2, parent, loop)
         e = skip_to_semi(k)
         info['stmts'].append((k, e, (parent, tuple(guards), loop, tuple(sw))))
-        if _is_ident(t) and (_is_ident(T(k + 1)) or T(k + 1) == '*'):   # 선언: 형 이름 [*]이름 …
+        # 선언: 형 이름 [*]이름 …, 또는 매크로 선언 VAR(uint8, AUTOMATIC) 이름 (괄호 안 쉼표로 캐스트와 구별)
+        macro = bool(re.fullmatch(r'[A-Z][A-Z0-9_]*', t)) and T(k + 1) == '(' and \
+            ',' in [T(i) for i in range(k + 2, close(k + 1))] and (_is_ident(T(close(k + 1) + 1)) or
+                                                                   T(close(k + 1) + 1) == '*')
+        if _is_ident(t) and (_is_ident(T(k + 1)) or T(k + 1) == '*' or macro):
             dep = 0
             for i in range(k + 1, e):
                 dep += (T(i) in '([{') - (T(i) in ')]}')
                 if dep == 0 and _is_ident(T(i)) and T(i + 1) in ('=', ';', ',', '[') and \
-                        (_is_ident(T(i - 1)) or T(i - 1) in ('*', ',')):
+                        (_is_ident(T(i - 1)) or T(i - 1) in ('*', ',') or (macro and T(i - 1) == ')')):
                     info['locals'].setdefault(cur['func'], set()).add(T(i))
         return e, None
 
@@ -714,6 +718,12 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     unknown = sorted({n for w in manual.values() for n in re.findall(r'상수 값 모름 \((\w+)\)', w)})
     if unknown:   # 값을 모르는 상수는 사용자에게 받아야 한다 (이름은 상세 파일에만)
         lines.append(f'  값을 모르는 상수 {len(unknown)}개 — 정의된 헤더 폴더를 --inc 폴더 로 주세요 (이름은 상세 파일)')
+        c_text = strip_code(srcs[0])   # 어디에 나오는지 개수만: 원인 찾기용
+        in_h = sum(any(re.search(rf'\b{n}\b', h) for h in srcs[1:]) for n in unknown)
+        many = sum(len(re.findall(rf'\b{n}\b', c_text)) >= 2 for n in unknown if
+                   not any(re.search(rf'\b{n}\b', h) for h in srcs[1:]))
+        lines.append(f'    어디에 나오나: 읽은 헤더에 있음 {in_h}개 · C 파일에서 2번 이상 {many}개'
+                     f' · C 파일에 1번(그 조건)뿐 {len(unknown) - in_h - many}개')
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
         lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
                      'o 찾음 x 없음 상 상한 시 시간')
