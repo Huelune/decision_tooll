@@ -380,16 +380,22 @@ def test_follow():
         'typedef enum { eSecretIdle, eSecretRun = 4 } secret_mode_t;\n')
     pe = bc.parse(bc.strip_code(e_src))
     me = bva.Model(pe, [e_src])
-    assert 'eSecretRun' not in me.cols and 'g_secretLevel' in me.cols and '상수 값 모름' in me.manual[pe[0][0]]
+    assert {'eSecretRun', 'g_secretLevel'} <= set(me.cols) and me.guessed == {'eSecretRun'}, me.cols
+    # 읽은 enum에 있는데 값을 못 구하면 상수 값 모름 (입력으로 만들지 않음)
+    pk = bc.parse(bc.strip_code(e_src))
+    mk = bva.Model(pk, [e_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])
+    assert 'eSecretRun' not in mk.cols and '상수 값 모름' in mk.manual[pk[0][0]], mk.manual
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path]) == 0
     out = buf.getvalue()
-    assert 'secret' not in out.lower() and '값을 모르는 상수 1개' in out and '--inc' in out, out
+    assert 'secret' not in out.lower() and '입력 변수로 본 이름 1개' in out and '--inc' in out, out
+    rep = open(os.path.join(tempfile.gettempdir(), bc.REPORT), encoding='utf-8').read()
+    assert 'eSecretRun' in rep.split('# 선언 없이 입력 변수로 본 이름')[1], rep
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert bc.main([c_path, '--inc', os.path.join(root, 'inc')]) == 0
-    assert '4/4 채움' in buf.getvalue() and '값을 모르는 상수' not in buf.getvalue(), buf.getvalue()
+    assert '4/4 채움' in buf.getvalue() and '입력 변수로 본' not in buf.getvalue(), buf.getvalue()
     # 매크로 선언 VAR(uint8, AUTOMATIC) 이름 은 변수 (캐스트와 구별), 모르는 이름이 어디 나오는지 개수
     a_src = ('static VAR(uint8, VAR_NOINIT) s_secretSt;\n'
              'FUNC(void, CODE) af(VAR(uint8, AUTOMATIC) secretIn) {\n'
@@ -398,7 +404,7 @@ def test_follow():
     pa = bc.parse(bc.strip_code(a_src))
     ma = bva.Model(pa, [a_src])
     assert ma.declared_var('s_secretSt') and not ma.declared_var('secretK') and 'secretIn' in ma.cols
-    assert '상수 값 모름 (secretK)' in ma.manual[pa[0][0]], ma.manual
+    assert ma.guessed == {'secretK'} and not ma.manual, ma.manual
     assert 'secretLoc' in pa[3]['locals']['af']
     # 쉼표로 여러 개 선언, 두 단어 형, 매크로 선언 여러 개 / 호출 인자·함수 원형·대입은 선언 아님
     dn = bva.decl_names(bc.strip_code(
@@ -412,7 +418,7 @@ def test_follow():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         assert bc.main([a_path]) == 0
-    assert '선언을 못 찾음 1개' in buf.getvalue() and 'secret' not in buf.getvalue().lower(), buf.getvalue()
+    assert '입력 변수로 본 이름 1개' in buf.getvalue() and 'secret' not in buf.getvalue().lower(), buf.getvalue()
     # 선언은 못 찾아도 대입·&넘김·멤버 접근이 있으면 변수 (다른 모듈 전역), 근거 없으면 상수 값 모름
     x_src = ('void init(void) { g_secDone = TRUE; Stub_Get(&g_secVal); }\n'
              'int xf(void) { if (g_secDone == TRUE) { return 1; } if (g_secVal > 3) { return 2; }'
@@ -420,7 +426,7 @@ def test_follow():
     px = bc.parse(bc.strip_code(x_src))
     mx = bva.Model(px, [x_src])
     assert {'g_secDone', 'g_secVal', 'g_secSt.mode'} <= set(mx.cols), mx.cols
-    assert [w for w in mx.manual.values()] == ['상수 값 모름 (eSecMode)'], mx.manual
+    assert not mx.manual and mx.guessed == {'eSecMode'}, mx.manual
     # --inc 에 파일을 직접 줘도 (확장자 상관없이) 읽고, 읽은 개수를 화면에
     txt = os.path.join(root, 'secret_defs.txt')
     open(txt, 'w', encoding='utf-8').write('#define eSecretRun (4u)\n#define secret_bad (NOPE + 1)\n')

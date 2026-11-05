@@ -414,6 +414,11 @@ class Model:
         text = self.text = '\n'.join(bc.strip_code(s) for s in srcs + [stub_src])
         self.isvar, self.declnames = {}, decl_names(text)
         self.setnames = {re.match(r'\w+', k).group() for k in self.info['set']}   # 파일 어디서든 대입되는 이름
+        # 읽은 코드에서 상수로 정의된 이름 (enum 항목·#define): 값을 못 구하면 사용자에게 받는다
+        self.constlike = {n for b in re.findall(r'\benum\b[^{;]*\{([^}]*)\}', text)
+                          for n in re.findall(r'(?:^|,)\s*([A-Za-z_]\w*)', b)} | {
+            n for s_ in srcs + [stub_src] for n in re.findall(r'^[ \t]*#[ \t]*define[ \t]+(\w+)', s_, re.M)}
+        self.guessed = set()   # 선언을 못 찾았지만 상수 정의도 없어 입력 변수로 본 이름 (다른 모듈 전역 변수)
         self.fn, self.vars, self.manual, self.labels = {}, {}, {}, {}
         self.cands, self.isf, self.uns, self.cols = {}, {}, {}, []
         self.vmemo, self.known, self.via = {}, {}, False   # 대입을 따라 만든 값 (value 참고)
@@ -550,8 +555,9 @@ class Model:
             if base in self.info['locals'].get(d.func, ()) and base not in self.info['params'].get(d.func, ()):
                 return _fixed(0)   # ponytail: 대입 전 지역 변수는 0으로 본다 (모든 갈래에서 대입하면 안 쓰임)
             if base not in self.info['params'].get(d.func, ()) and not self.declared_var(base):
-                # 인자도 지역·전역 변수도 아님 → enum 값이나 다른 헤더의 상수. 입력으로 만들면 경로가 틀어진다
-                raise Manual(f'상수 값 모름 ({base})')
+                if base in self.constlike:   # 읽은 enum·#define에 있는데 값을 못 구함 → 입력으로 만들면 경로가 틀어진다
+                    raise Manual(f'상수 값 모름 ({base})')
+                self.guessed.add(base)   # 어디에도 정의가 없으면 다른 모듈 전역 변수로 보고 입력으로 둔다
             self.leaf.add(t)
             return _var(t)
         self.via = True

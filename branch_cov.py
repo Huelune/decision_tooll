@@ -21,7 +21,7 @@ import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
-VERSION = '2026-11-05.17'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
+VERSION = '2026-11-05.18'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
@@ -727,6 +727,9 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
         lines.append(f'    종류: enum 항목인데 값 못 구함 {len(in_enum)}개 · #define인데 값 못 구함 {len(in_def)}개'
                      f' · 선언을 못 찾음 {len(unknown) - len(in_enum) - len(in_def)}개'
                      ' (다른 모듈 전역 변수나 읽지 않은 헤더의 enum)')
+    if m.guessed:   # 선언을 못 찾은 이름은 입력 변수로 본다: enum이면 틀리므로 개수를 알린다
+        lines.append(f'선언 없이 입력 변수로 본 이름 {len(m.guessed)}개 — 다른 모듈 전역 변수면 그대로,'
+                     ' enum·상수면 정의된 헤더를 --inc로 (이름은 상세 파일)')
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
         lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
                      'o 찾음 x 없음 상 상한 시 시간')
@@ -736,6 +739,7 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     text = ['', '# 경계값 TC (CSV와 같은 순서)', m.tc_text(tcs), '# 자동으로 못 만든 분기']
     text += [f'L{d.line_of(o)} {d.kind} {o}: {why}' for (d, o), why in manual.items()]
     text += ['', '# 값을 모르는 상수 (정의된 헤더 폴더를 --inc 로)'] + unknown
+    text += ['', '# 선언 없이 입력 변수로 본 이름 (enum·상수면 정의된 헤더를 --inc 로)'] + sorted(m.guessed)
     text += ['', '# 값을 못 구한 #define (식 안의 이름을 모르거나 숫자 식이 아님)'] + cs['failed']
     return lines, '\n'.join(text) + '\n'
 

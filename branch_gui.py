@@ -188,7 +188,9 @@ class App:
                                 (f'\n그중 {timeout}개는 시간 한도에 걸렸습니다. 위 "시간 한도(초)"를 늘려 다시 해 보세요.'
                                  if timeout else '') +
                                 (f'\n값을 모르는 상수(enum 등) {len(unknown)}개: [헤더 폴더 추가]로 정의된 폴더를 주세요.'
-                                 if unknown else ''))
+                                 if unknown else '') +
+                                (f'\n선언 없이 입력 변수로 본 이름 {len(m.guessed)}개: enum·상수면 [헤더 폴더 추가]로 주세요.'
+                                 if m.guessed else ''))
 
     def parse_failed(self):
         with open(os.path.join(tempfile.gettempdir(), bc.REPORT), 'w', encoding='utf-8') as f:
