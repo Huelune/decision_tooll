@@ -391,6 +391,14 @@ def test_follow():
     pk = bc.parse(bc.strip_code(e_src))
     mk = bva.Model(pk, [e_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])
     assert 'eSecretRun' not in mk.cols and '상수 값 모름' in mk.manual[pk[0][0]], mk.manual
+    # 여러 변수를 더한 값·대입을 거친 값의 크기 비교도 경계 바로 옆 값으로 (한 변수로 풀어 봄)
+    s_src = ('int g(int x, int a, int b, int c, int k) { int t = x * 3; int u = 0; t = t + 17; t = t - 5;\n'
+             ' if (t / 2 > 123) { u = 1; }\n'
+             ' if (a > 10) { if (b > 20) { if (a + b + c > 100) { u = 2; } } }\n'
+             ' if (k * 7 + a - b >= 1000) { u = 3; }\n return u; }\n')
+    ms = bva.Model(bc.parse(bc.strip_code(s_src)), [s_src])
+    ts, mans = ms.generate()
+    assert not mans and not ms.plain and len(set().union(*(g for _, _, g in ts))) == 10, (mans, ms.plain)
     # 결과를 모르는 결정문도 D 번호를 차지한다: 뒤 결정문은 D2
     q_src = 'int g_secLv;\nint q(int mode) { int r = 0; if (mode == eSecretRun) { r = 1; } if (g_secLv > 3) { r = 2; } return r; }\n'
     mq = bva.Model(bc.parse(bc.strip_code(q_src)), [q_src, 'enum { eSecretRun = SECRET_UNDEF };\n'])

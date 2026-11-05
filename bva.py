@@ -430,6 +430,7 @@ class Model:
         self.own, self.leaf, self.deadline = {}, set(), float('inf')   # own: 경계 검사에서 움직일 변수
         # plain: 경계는 못 맞추고 일반 값으로 채우는 분기, alone: 분기 하나만 채우는 값
         self.plain, self.stop, self.alone, self.trace = set(), None, {}, {}
+        self.cmps = {}   # 결정문 -> [(왼쪽 값 함수, 오른쪽 값 함수)]: 비교 양변 (climb의 풀어 보기용)
         self.dnums, self.ccache, self.parts = {}, {}, {}   # parts: 결정문 -> ('&&' 또는 '||', 조각 값 함수들)   # 결정문 -> 조건 숫자, (변수, 경로 결정문들) -> 후보
         self.info['stmts'].sort(key=lambda s: s[0])
         self.starts = [s[0] for s in self.info['stmts']]
@@ -460,6 +461,7 @@ class Model:
                 continue
             self.fn[d], self.vars[d], self.dnums[d] = f, vs, nums
             self.parts[d] = self.split(d)
+            self.cmps[d] = self.comparisons(d)
             # 조건 값에 직접 들어가는 변수만 (앞 분기 결과를 정하는 변수는 빼서 경계 검사를 가볍게)
             self.own[d] = [v for v in vs if v in self.leaf]
             flt = any(isinstance(n, float) for n in nums)
@@ -493,6 +495,66 @@ class Model:
                     return None
                 return op, fs
         return None
+
+    def comparisons(self, d):
+        """조건의 && / || 조각마다 맨 바깥 비교(== != < <= > >=)의 양변 값 함수.
+        a + b + c > 100 처럼 여러 변수를 더한 값의 크기 비교를 한 변수로 풀 때 쓴다(lin)."""
+        out = []
+        for piece in re.split(r'&&|\|\|', bc.norm(d.cond)):
+            p = piece.strip()
+            while p.startswith('(') and p.endswith(')'):   # 바깥 괄호 벗기기 (짝이 맞을 때만)
+                dep = 0
+                for i, ch in enumerate(p):
+                    dep += (ch == '(') - (ch == ')')
+                    if dep == 0 and i < len(p) - 1:
+                        break
+                else:
+                    p = p[1:-1].strip()
+                    continue
+                break
+            if p.count('(') != p.count(')'):
+                continue   # && 안쪽 괄호에서 잘린 조각
+            dep, hits = 0, []
+            for m in re.finditer(r'[()]|==|!=|<=|>=|<<|>>|->|<|>', p):
+                t = m.group()
+                dep += (t == '(') - (t == ')')
+                if dep == 0 and t in ('==', '!=', '<=', '>=', '<', '>'):
+                    hits.append(m)
+            if not hits:
+                continue
+            m = next((h for h in hits if h.group() in ('==', '!=')), hits[0])   # == 이 < 보다 나중에 묶인다
+            try:
+                fa, fb = (translate(x, self.consts, lambda t, call: self.var_of(t, call, d))[0]
+                          for x in (p[:m.start()], p[m.end():]))
+            except Manual:
+                continue
+            out.append((fa, fb))
+        return out
+
+    def lin(self, v, V, req):
+        """다른 값은 그대로 두고 v 하나로 비교 양변의 차이를 0으로: v를 한 칸 움직여 기울기를 재서 푼 값과
+        그 양옆. 후보 숫자에 없는 경계(a=11, b=21일 때 a + b + c > 100 → c 69)를 찾는다."""
+        s, x0, out = self.step(v), V.get(v, 0), []
+        for d in req:
+            if v not in self.vars.get(d, ()):
+                continue
+            for fa, fb in self.cmps.get(d, ()):
+                def g(x):
+                    W, memo = Defaults({**V, v: x}), {}
+                    R = lambda i: self.outcome(self.decs[i], W, memo)
+                    return fa(W, R) - fb(W, R)
+                try:   # 넓게 재야 정수 나눗셈(t / 2)으로 잘린 기울기도 맞다
+                    g0, g1 = g(x0), g(x0 + 1000 * s)
+                    if g1 == g0:
+                        continue
+                    x = x0 - g0 * 1000 * s / (g1 - g0)
+                except Exception:
+                    continue
+                if not math.isfinite(x) or abs(x) > 1e12:
+                    continue
+                base = [math.floor(x), math.ceil(x)] if not self.isf[v] else [round(x, 6)]
+                out += [round(b + k * s, 6) if self.isf[v] else int(b + k) for b in base for k in (-1, 0, 1)]
+        return [x for x in dict.fromkeys(out) if not (self.uns[v] and x < 0)]
 
     def expand(self, v, ns):
         """숫자마다 경계 양쪽 (정수 ±1, float ±0.1), 0 이상 작은 값부터."""
@@ -792,9 +854,14 @@ class Model:
         V = dict(start or {})
         best, full, nodes = self.score(Defaults(V), req), 100 * len(req), 0
         while best < full:
-            better = None
-            for v in vs:
-                for x in cl[v]:
+            better, bad = None, None
+            # 후보 숫자로 먼저, 하나도 안 나아지면 변수 하나로 풀어 본 값으로 (더한 값의 크기 비교 등)
+            # (묶을 때 start 에서 시작하는 짧은 탐색은 후보 숫자만: 풀어 보기는 분기 하나만 풀 때 시간을 쓴다)
+            for v, xs in [(v, cl[v]) for v in vs] + ([(v, None) for v in vs] if start is None else []):
+                if xs is None and bad is None:   # 아직 못 맞춘 결정문만 풀어 본다
+                    W, memo = Defaults(V), {}
+                    bad = {d: o for d, o in req.items() if self.outcome(d, W, memo) != o}
+                for x in (xs if xs is not None else self.lin(v, V, bad)):
                     if x == V.get(v, 0):
                         continue
                     nodes += 1
@@ -813,8 +880,20 @@ class Model:
             if better is None:
                 return None   # 더 나아지지 않음
             V = better
-        W = Defaults(V)
-        return V if all(self.boundary(d, o, W) for d, o in bnd) else None
+        ok = lambda V2: all(self.boundary(d, o, Defaults(V2)) for d, o in bnd)
+        if ok(V):
+            return V
+        tries = 12 if start is not None else limit   # 묶을 때는 짧게 (시간이 TC 묶기에 많이 든다)
+        for d, o in bnd:   # 결과는 다 맞는데 경계가 아니면: 변수 하나를 풀어 경계로 옮겨 본다 (a + b + c 가 딱 101)
+            for v in self.own.get(d, ()):
+                for x in self.lin(v, V, {d: o}):
+                    tries -= 1
+                    if tries < 0:
+                        return None
+                    V2 = {**V, v: x}
+                    if self.score(Defaults(V2), req) == full and ok(V2):
+                        return V2
+        return None
 
     def solve_alone(self, t, limit=LIMIT):
         """분기 t 하나만 채우는 값. 앞 분기는 안 타는 쪽(0)으로 두고 경로 조건 변수만 바꾸는 빠른 탐색부터,
