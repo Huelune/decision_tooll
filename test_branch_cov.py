@@ -61,15 +61,21 @@ def test():
     r = bc.analyze(C_SRC, TC, func='secret_func')
     kinds = [d.kind for d in r['decs']]
     assert kinds == ['if', 'if', 'elseif', 'switch', 'if', 'for', 'if'], kinds  # 주석·문자열 속 if 제외
-    # 2+2+2+3+2+2+2 = 15, 채움: a T/F, 사슬 T/F, elseif T, case 3개 = 8
+    # 2+2+2+3+2+2+2 = 15, 채움: a T/F, 사슬 T/F, elseif T/F, case 3개 = 9
     total = sum(len(d.outcomes()) for d in r['decs'])
-    assert (total, total - len(r['missing'])) == (15, 8), (total, len(r['missing']))
+    assert (total, total - len(r['missing'])) == (15, 9), (total, len(r['missing']))
     chain_head = r['decs'][1]
     assert r['cov'][(chain_head, 'F')] == ['TC2*', 'TC3'], r['cov'][(chain_head, 'F')]  # elseif에서 추론
-    assert (r['decs'][2], 'F') not in r['cov']
+    assert r['cov'][(r['decs'][2], 'F')] == ['TC3']   # [F] if(첫 조건) = 사슬 전체 F (else)
     msgs = [(n, w) for n, _, w, _ in r['warns']]
     assert any(n == 2 and '못 찾음' in w for n, w in msgs), msgs
-    assert any(n == 3 and 'else if 결과가 빠짐' in w for n, w in msgs), msgs
+    assert not any('else if' in w for n, w in msgs), msgs
+    # 만들 때도 사슬은 D 하나: else if 갈래는 [T] elseif(…) 한 줄, 모두 F면 [F] if(첫 조건)
+    head, eif = r['decs'][1], r['decs'][2]
+    assert [bc.tc_line(i, d, o) for i, (d, o) in enumerate(bc.chain(bc.need(eif, 'T')), 1)] == [
+        'D1 [T] elseif(c < 10)'], bc.chain(bc.need(eif, 'T'))
+    assert bc.chain([(head, 'F'), (eif, 'F')]) == [(head, 'F')]
+    assert bc.chain([(head, 'T')]) == [(head, 'T')]
     # case 2 아래의 if 는 case 2 를, for 안의 if 는 for T 를 부모로 갖는다
     assert r['decs'][4].parent == (r['decs'][3], 'case 2')
     assert r['decs'][6].in_loop and not r['decs'][4].in_loop
@@ -87,11 +93,11 @@ def test():
     with contextlib.redirect_stdout(buf):
         assert bc.main(['C:/secret_dir/secret.c', 'secret_tc.txt']) == 1
     assert 'secret' not in buf.getvalue().lower(), buf.getvalue()
-    # 예시 파일: 15개 중 13개, 못 채운 것은 L23 if T 와 L27 case 3, 경고는 TC4 else if 누락 하나
+    # 예시 파일: 15개 중 13개, 못 채운 것은 L23 if T 와 L27 case 3, 경고 없음 ([F] if 는 사슬 전체 F)
     ex = bc.analyze(open('example.c', encoding='utf-8').read(),
                     open('example_tc.txt', encoding='utf-8').read(), 'example')
     assert [(ln, o) for ln, _, o in ex['missing']] == [(23, 'T'), (27, 'case 3')], ex['missing']
-    assert [(n, w[:3]) for n, _, w, _ in ex['warns']] == [(4, 'L12')], ex['warns']
+    assert [(n, w[:3]) for n, _, w, _ in ex['warns']] == [], ex['warns']
     # 화면에서 넣어 주는 줄은 다시 읽으면 같은 분기로 맞아야 한다
     for d in ex['decs']:
         for o in d.outcomes():

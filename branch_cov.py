@@ -5,6 +5,7 @@
 
 TC 표기 파일: 빈 줄로 TC를 나눈다. 한 줄은 `D1 [T] if(a==1)` 형식
 (if / else if / elseif / else / case / default / while / for).
+if / else if 사슬은 D 하나: 들어간 갈래를 [T] if(…)·[T] elseif(…)로, else(모두 F)는 [F] if(첫 조건)으로.
 블록 첫 줄이 이 형식이 아니면 TC 이름으로 본다.
 
 화면에는 개수·줄 번호·TC 순번만 찍는다. 조건문 원문은 %TEMP%\\branch_cov_report.txt 에만 쓴다.
@@ -21,7 +22,7 @@ import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
-VERSION = '2026-11-05.19'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
+VERSION = '2026-11-05.20'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
@@ -443,6 +444,10 @@ def analyze(c_src, tc_text, func=None, parsed=None):
             for outcome in (dict.fromkeys(tf) if o is None else [o] if 'T' in tf else []):
                 got.setdefault(d, {})[outcome] = True
             imply(d)
+            nd = d
+            while o is None and 'F' in tf and nd.next:   # [F] if(…) 는 사슬 전체 F (else): 뒤 else if 도 F
+                nd = nd.next
+                got.setdefault(nd, {})['F'] = True
 
         for d, outs in got.items():
             for o, explicit in outs.items():
@@ -451,8 +456,6 @@ def analyze(c_src, tc_text, func=None, parsed=None):
                 continue
             if len(outs) > 1:
                 warns.append((n, '-', f'L{d.line} 결정문에 서로 다른 결과가 함께 적힘', ''))
-            if 'F' in outs and d.next and d.next not in got:
-                warns.append((n, '-', f'L{d.next.line} else if 결과가 빠짐 (앞이 F면 평가됨)', ''))
 
     missing = sorted(((d.line_of(o), d, o) for d in decs for o in d.outcomes() if (d, o) not in cov),
                      key=lambda m: m[0])
@@ -524,12 +527,26 @@ def tc_line(i, d, o):
     return f"D{i} [{'T' if d.kind == 'switch' else o}] {template(d, o)}"
 
 
+def chain(path):
+    """if / else if 사슬은 TC 표기에서 D 하나: 들어간 갈래를 [T] if(…)·[T] elseif(…)로,
+    조건이 모두 F(else, 또는 아무 갈래도 안 탐)면 [F] if(첫 조건)으로. path: 코드 순서의 (결정문, 결과)."""
+    ds = {d for d, _ in path}
+    out = []
+    for d, o in path:
+        if o == 'F' and d.next in ds:
+            continue   # 사슬의 뒤 조건 줄이 이 줄을 대신한다
+        while o == 'F' and d.kind == 'elseif':
+            d = d.parent[0]
+        out.append((d, o))
+    return out
+
+
 def howto(d, o, info, stubs=None):
     """(d, o)를 채우는 TC를 쓰는 데 필요한 것: 거쳐야 할 분기와 조건에 쓰인 값의 출처."""
     path = need(d, o)
     out = [f"L{d.line_of(o)} {_kind(d, o)} {'' if d.kind == 'switch' else o} 채우기",
            '  꼭 거쳐야 하는 분기 (여기 없는 분기는 어떤 결과든 됨, D 번호는 실제 순서로 고칠 것)']
-    out += ['    ' + tc_line(i, pd, po) for i, (pd, po) in enumerate(path, 1)]
+    out += ['    ' + tc_line(i, pd, po) for i, (pd, po) in enumerate(chain(path), 1)]
     vals = values(path, info, stubs)
     if vals:
         w = max(map(len, vals))

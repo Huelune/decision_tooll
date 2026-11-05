@@ -959,16 +959,14 @@ class Model:
         for n, (V, res, _) in enumerate(tcs, start):
             lines = [f"경계 TC{n}  " + ', '.join(f'{k}={self.fmt(v)}' for k, v in V.items())]
             i = 0
-            for d in self.decs:
-                if d not in res:
-                    continue
-                if res[d] is None:
+            for d, r in bc.chain([(d, res[d]) for d in self.decs if d in res]):   # if/else if 사슬은 D 하나
+                if r is None:
                     hint = ' — 들어가면 [T/F], 안 들어가면 [F]' if d.kind in LOOPS else ''
                     lines.append(f'# L{d.line} {d.kind}: 직접 확인 ({self.manual.get(d, "결과 모름")}){hint}')
                     continue
                 i += 1
-                line = bc.tc_line(i, d, res[d])
-                if res[d] == 'T' and d.kind in LOOPS:   # 반복문에 들어가면 끝날 때 F도 탄다
+                line = bc.tc_line(i, d, r)
+                if r == 'T' and d.kind in LOOPS:   # 반복문에 들어가면 끝날 때 F도 탄다
                     line = line.replace('[T]', '[T/F]', 1)
                 lines.append(line)
             blocks.append('\n'.join(lines))

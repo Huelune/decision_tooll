@@ -18,7 +18,7 @@ D3 [T] else
 D4 [T] case 4:
 D5 [T/F] while(r > 100)
 
-TC4  a=1 c=20 x=3 mode=9   (일부러 else if 줄을 빠뜨림)
+TC4  a=1 c=20 x=3 mode=9
 D1 [T] if(a==1)
 D2 [F] if((c==x) && (c > 10))
 D3 [T] default:

@@ -356,7 +356,7 @@ class App:
         if d is None:
             return
         name = f"새 TC  L{d.line_of(o)} {bc._kind(d, o)} {'' if d.kind == 'switch' else o}".rstrip()
-        lines = [name] + [bc.tc_line(i, pd, po) for i, (pd, po) in enumerate(bc.need(d, o), 1)]
+        lines = [name] + [bc.tc_line(i, pd, po) for i, (pd, po) in enumerate(bc.chain(bc.need(d, o)), 1)]
         body = self.tc_text().rstrip()
         self.text.delete('1.0', 'end')
         self.text.insert('1.0', (body + '\n\n' if body else '') + '\n'.join(lines) + '\n')
