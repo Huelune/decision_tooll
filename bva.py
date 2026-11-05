@@ -685,8 +685,24 @@ class Model:
         c = re.sub(r'->|\.', ' ', bc.norm(t[0].cond))
         ops = ''.join(dict.fromkeys(re.findall(r'&&|\|\||==|!=|<=|>=|<<|>>|[-+*/%&|^<>!~?]', c)))
         calls = len(re.findall(r'\b(?!sizeof\b)[A-Za-z_]\w*\s*\(', c))
-        return (f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · 고정stub {len(fixed)}'
-                f' · 탐색 {tried:<8} · 식 {ops} 호출{calls} 풀이{len(self.cmps.get(t[0], ()))}')
+        # 첫 비교의 (왼쪽 - 오른쪽): 모든 값 0일 때, 그리고 그 조건의 첫 변수 1당 변화 (u = unsigned로 봄)
+        slope = ''
+        v = next(iter(self.own.get(t[0], ())), None)
+        if self.cmps.get(t[0]) and v is not None:
+            fa, fb = self.cmps[t[0]][0]
+
+            def g(x):
+                W, memo = Defaults({v: x}), {}
+                return fa(W, lambda i: self.outcome(self.decs[i], W, memo)) - fb(
+                    W, lambda i: self.outcome(self.decs[i], W, memo))
+            try:
+                g0 = g(0)
+                slope = f' 차{g0:.6g}/기울기{(g(1000 * self.step(v)) - g0) / (1000 * self.step(v)):.3g}' + (
+                    'u' if self.uns.get(v) else '')
+            except Exception:
+                slope = ' 차?'
+        return (f'경로 {len(path):>2} · 변수 {len(allv):>3}/빠른 {len(own):>2} · 후보 {cand:>3} · stub {len(fixed)}'
+                f' · 탐색 {tried:<8} · 식 {ops} 호출{calls} 풀이{len(self.cmps.get(t[0], ()))}{slope}')
 
     def why_not(self, t, stop=None):
         names = sorted({n for pd, _ in bc.need(*t) for n in self.fixed.get(pd, ())})

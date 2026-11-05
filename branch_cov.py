@@ -22,7 +22,7 @@ import time
 import traceback
 
 REPORT = 'branch_cov_report.txt'
-VERSION = '2026-11-05.23'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
+VERSION = '2026-11-05.24'   # 화면 첫 줄에 찍어 어느 코드로 돌렸는지 가린다
 TERMINAL = {'break', 'continue', 'return', 'goto'}
 KEYKIND = {'if': 'if', 'elseif': 'if', 'while': 'while', 'dowhile': 'while', 'for': 'for'}
 TC_LINE = re.compile(r'^\s*(?:D\s*(\d+)\s*)?\[\s*([TFtf](?:\s*/\s*[TFtf])?)\s*\]\s*(.+?)\s*$')  # [T] [F] [T/F]
@@ -750,7 +750,7 @@ def make_bva(parsed, srcs, csv_path, stub_src='', stub_zero=True, budget=60, pat
     if 0 < len(manual) <= 8:   # 남은 게 적으면 분기마다 숫자로 진단 (원인 찾기용)
         lines.append('  분기별 진단  탐색 = 경계(1~2개만·조각씩·빠른·전체) 일반(같은 넷) 순, '
                      'o 찾음 x 없음 상 상한 시 시간')
-        lines.append('    식 = 그 조건의 연산자 · 호출 = 함수 호출 수 · 풀이 = 양변 계산으로 풀 수 있는 비교 수')
+        lines.append('    식 = 조건의 연산자 · 호출 = 함수 호출 수 · 풀이 = 풀 수 있는 비교 수 · 차 = 값 0일 때 왼쪽-오른쪽')
         lines += [f'    L{d.line_of(o)} {o:<4} {m.diagnose((d, o))}' for d, o in sorted(manual, key=lambda t: t[0].pos)]
     if path_n:   # 실제 도구 결과와 맞춰 보기: TC 하나의 예상 경로를 줄 번호·결과로만
         lines += path_lines(m, tcs, path_n)

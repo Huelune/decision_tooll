@@ -359,12 +359,12 @@ def test_follow():
     tcs, manual = m2.generate()
     assert (inner, 'T') in m2.plain and (inner, 'T') in set().union(*(g for _, _, g in tcs)), m2.plain
     assert list(manual) == [(inner, 'F')] and bva.reason_kind(manual[(inner, 'F')]) == '갈 수 없는 경로/후보 밖'
-    assert m2.diagnose((inner, 'F')).endswith('탐색 xxxxxxxx · 식 > 호출0 풀이1') and '고정stub 0' in m2.diagnose((inner, 'F'))
+    assert m2.diagnose((inner, 'F')).endswith('탐색 xxxxxxxx · 식 > 호출0 풀이1 차-5/기울기1') and 'stub 0' in m2.diagnose((inner, 'F'))
     # 식 모양: 연산자·호출 수만 (이름 없음)
     sq = 'int sq(int secretA) { if ((secretA * 3 + secret_fn(secretA)) % 7 == 3) { return 1; } return 0; }'
     pq = bc.parse(bc.strip_code(sq))
     dq = bva.Model(pq, [sq]).diagnose((pq[0][0], 'T'))
-    assert dq.endswith('식 *+%== 호출1 풀이1') and 'secret' not in dq, dq
+    assert '식 *+%== 호출1 풀이1' in dq and 'secret' not in dq, dq
     path = os.path.join(tempfile.mkdtemp(), 'nb.csv')
     m2.write_csv(path, tcs)
     assert '(경계 아님)' in open(path, encoding='utf-8-sig').read()
